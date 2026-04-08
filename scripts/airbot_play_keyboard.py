@@ -75,10 +75,19 @@ class UiState:
     warnings: deque[str] = field(default_factory=lambda: deque(maxlen=8))
     last_eef_feedback: dict[str, Any] | None = None
 
-    def measured_target_seed(self) -> None:
-        if all(value is not None for value in self.current_positions):
-            self.target_positions = [float(value) for value in self.current_positions]  # type: ignore[arg-type]
-            self.target_initialized = True
+    def current_position_snapshot(self) -> list[float] | None:
+        if not all(value is not None for value in self.current_positions):
+            return None
+        return [float(value) for value in self.current_positions if value is not None]
+
+    def measured_target_seed(self, *, force: bool = False) -> None:
+        if self.target_initialized and not force:
+            return
+        snapshot = self.current_position_snapshot()
+        if snapshot is None:
+            return
+        self.target_positions = snapshot
+        self.target_initialized = True
 
 
 class RawTerminal:
@@ -331,7 +340,9 @@ async def handle_key(ws, state: UiState, key: str) -> bool:
         delta = 5.0 * state.step_size
 
     if delta is not None:
-        if not state.target_initialized:
+        if state.arm_state == "command_following":
+            state.measured_target_seed(force=True)
+        elif not state.target_initialized:
             state.measured_target_seed()
         state.target_positions[state.selected_joint] += delta
         if state.arm_state == "command_following":

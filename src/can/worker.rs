@@ -225,8 +225,9 @@ impl CanWorker {
 
     #[cfg(test)]
     pub(crate) fn dummy_for_tests() -> Arc<Self> {
-        let (command_tx, _command_rx) = mpsc::channel(DEFAULT_INTENT_CHANNEL_CAPACITY);
+        let (command_tx, mut command_rx) = mpsc::channel(DEFAULT_INTENT_CHANNEL_CAPACITY);
         let (frames_tx, _) = broadcast::channel(DEFAULT_FRAME_CHANNEL_CAPACITY);
+        thread::spawn(move || while command_rx.blocking_recv().is_some() {});
         Arc::new(Self {
             interface: "test".to_owned(),
             backend: CanWorkerBackend::AsyncFd,

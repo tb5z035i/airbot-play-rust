@@ -22,3 +22,6 @@ Thumbs.db
 .env.local
 !.env.example
 .pin-env/
+
+
+**/__pycache__/

@@ -306,9 +306,9 @@ impl AirbotPlayClient {
         }))
     }
 
-    pub fn set_arm_state(&self, state: ArmState) -> Result<(), ClientError> {
+    pub async fn set_arm_state(&self, state: ArmState) -> Result<(), ClientError> {
         self.require_control()?;
-        self.arm.set_state(state);
+        self.arm.set_state(state).await?;
         Ok(())
     }
 

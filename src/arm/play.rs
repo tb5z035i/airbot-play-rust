@@ -6,10 +6,11 @@ use crate::motor::MotorRuntime;
 use crate::protocol::board::BoardProtocol;
 use crate::protocol::board::play_base::PlayBaseBoardProtocol;
 use crate::protocol::board::play_end::PlayEndBoardProtocol;
+use crate::protocol::motor::MotorProtocol;
 use crate::protocol::motor::dm::DmProtocol;
 use crate::protocol::motor::od::OdProtocol;
 use crate::request_service::{RequestError, RequestOutcome, RequestService};
-use crate::types::{DecodedFrame, MotorCommand, ParamValue, RawCanFrame};
+use crate::types::{DecodedFrame, MotorCommand, ParamValue, ProtocolNodeKind, RawCanFrame};
 use crate::warning_bus::WarningBus;
 use crate::warnings::{WarningEvent, WarningKind};
 use serde::{Deserialize, Serialize};
@@ -214,11 +215,37 @@ impl PlayArm {
         *self.state.read().expect("arm state lock poisoned")
     }
 
-    pub fn set_state(&self, state: ArmState) {
+    pub async fn set_state(&self, state: ArmState) -> Result<(), PlayArmError> {
+        let previous = self.state();
+        if previous == state {
+            return Ok(());
+        }
+
+        if previous == ArmState::Disabled && state != ArmState::Disabled {
+            let activation_frames = self.build_dm_activation_frames()?;
+            if !activation_frames.is_empty() {
+                self.worker
+                    .send_frames(CanTxPriority::Lifecycle, activation_frames)
+                    .await?;
+            }
+        }
+
+        if state == ArmState::CommandFollowing {
+            self.seed_command_target_from_feedback();
+        }
+
         *self.state.write().expect("arm state lock poisoned") = state;
         if state == ArmState::Disabled {
             self.command_slot.clear();
+            let disable_frames = self.build_dm_disable_frames()?;
+            if !disable_frames.is_empty() {
+                self.worker
+                    .send_frames(CanTxPriority::Lifecycle, disable_frames)
+                    .await?;
+            }
         }
+
+        Ok(())
     }
 
     pub fn subscribe_feedback(&self) -> broadcast::Receiver<ArmJointFeedback> {
@@ -234,6 +261,52 @@ impl PlayArm {
 
     pub fn latest_joint_target(&self) -> Option<JointTarget> {
         self.command_slot.latest().map(|snapshot| snapshot.target)
+    }
+
+    fn seed_command_target_from_feedback(&self) {
+        if let Some(feedback) = self.latest_feedback() {
+            self.command_slot.set(JointTarget::new(feedback.positions));
+        } else {
+            self.command_slot.clear();
+        }
+    }
+
+    fn build_dm_activation_frames(&self) -> Result<Vec<RawCanFrame>, PlayArmError> {
+        let mut frames = Vec::new();
+        for motor in self
+            .motors
+            .iter()
+            .filter(|motor| motor.kind() == ProtocolNodeKind::DmMotor)
+        {
+            let protocol = DmProtocol::new(motor.joint_id());
+            frames.extend(
+                protocol
+                    .generate_enable()
+                    .map_err(|err| PlayArmError::Model(ModelError::Backend(err.to_string())))?,
+            );
+            frames.extend(
+                protocol
+                    .generate_param_set("control_mode", &ParamValue::U32(0x01))
+                    .map_err(|err| PlayArmError::Model(ModelError::Backend(err.to_string())))?,
+            );
+        }
+        Ok(frames)
+    }
+
+    fn build_dm_disable_frames(&self) -> Result<Vec<RawCanFrame>, PlayArmError> {
+        let mut frames = Vec::new();
+        for motor in self
+            .motors
+            .iter()
+            .filter(|motor| motor.kind() == ProtocolNodeKind::DmMotor)
+        {
+            frames.extend(
+                DmProtocol::new(motor.joint_id())
+                    .generate_disable()
+                    .map_err(|err| PlayArmError::Model(ModelError::Backend(err.to_string())))?,
+            );
+        }
+        Ok(frames)
     }
 
     pub fn submit_joint_target(&self, positions: [f64; ARM_DOF]) -> Result<JointTarget, PlayArmError> {
@@ -473,13 +546,15 @@ impl PlayArm {
         let feedback = self.latest_feedback().ok_or(PlayArmError::MissingFeedback)?;
         let gravity = self.gravity_compensation(&feedback.positions)?;
         let target = self.command_slot.latest().ok_or(PlayArmError::MissingFeedback)?;
-
-        if target.age > STALE_COMMAND_THRESHOLD {
+        let target_positions = if target.age > STALE_COMMAND_THRESHOLD {
             self.maybe_publish_stale_command_warning(target.age);
-        }
+            feedback.positions
+        } else {
+            target.target.positions
+        };
 
         self.encode_mit_commands((0..ARM_DOF).map(|index| MotorCommand {
-            pos: target.target.positions[index],
+            pos: target_positions[index],
             vel: 0.0,
             eff: gravity[index],
             mit_kp: FOLLOWING_KP[index],
@@ -581,7 +656,7 @@ impl PlayArm {
             WarningEvent::new(
                 WarningKind::StaleCommandReplay,
                 format!(
-                    "command slot is stale after {:.1} ms but is still being replayed",
+                    "command slot is stale after {:.1} ms; holding current positions until a fresh command arrives",
                     age.as_secs_f64() * 1000.0
                 ),
             )
@@ -645,13 +720,16 @@ fn extract_gravity_coefficients(outcome: &RequestOutcome) -> Option<BTreeMap<Str
 
 #[cfg(test)]
 mod tests {
-    use super::{ArmBootstrapInfo, ArmState, PlayArm, extract_gravity_coefficients};
+    use super::{ArmBootstrapInfo, ArmJointFeedback, ArmState, PlayArm, extract_gravity_coefficients};
     use crate::arm::command_slot::JointTarget;
     use crate::can::worker::CanWorker;
     use crate::model::{KinematicsDynamicsBackend, ModelError, MountedEefType, Pose};
     use crate::motor::MotorRuntime;
+    use crate::protocol::motor::MotorProtocol;
+    use crate::protocol::motor::dm::DmProtocol;
+    use crate::protocol::motor::od::OdProtocol;
     use crate::request_service::RequestOutcome;
-    use crate::types::{DecodedFrame, FrameKind, ParamValue, ProtocolNode, ProtocolNodeKind};
+    use crate::types::{DecodedFrame, FrameKind, ParamValue, ProtocolNode, ProtocolNodeKind, RawCanFrame};
     use crate::warning_bus::WarningBus;
     use std::collections::BTreeMap;
     use std::sync::{Arc, Mutex};
@@ -725,6 +803,32 @@ mod tests {
         )))
     }
 
+    fn decode_command_positions(frames: &[RawCanFrame]) -> [f64; 6] {
+        let mut positions = [0.0; 6];
+        for (index, frame) in frames.iter().enumerate() {
+            let motor_id = (index + 1) as u16;
+            let decoded = if index < 3 {
+                let mut protocol = OdProtocol::new(motor_id);
+                protocol.inspect(frame)
+            } else {
+                let mut protocol = DmProtocol::new(motor_id);
+                protocol.inspect(frame)
+            }
+            .expect("frame should decode into a motion command");
+            match decoded {
+                DecodedFrame::MotionCommand { command, .. } => positions[index] = command.pos,
+                other => panic!("unexpected decoded frame: {other:?}"),
+            }
+        }
+        positions
+    }
+
+    fn assert_positions_close(actual: [f64; 6], expected: [f64; 6]) {
+        for (actual, expected) in actual.into_iter().zip(expected) {
+            assert!((actual - expected).abs() < 0.002, "expected {expected}, got {actual}");
+        }
+    }
+
     #[tokio::test]
     async fn realtime_commands_are_rejected_when_not_following() {
         let Some(arm) = arm() else {
@@ -739,13 +843,105 @@ mod tests {
         let Some(arm) = arm() else {
             return;
         };
-        arm.set_state(ArmState::CommandFollowing);
+        arm.set_state(ArmState::CommandFollowing)
+            .await
+            .expect("state transition should succeed");
 
         let pose = Pose::from_slice(&[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]).unwrap();
         let target = arm.submit_task_target(&pose).expect("task target should succeed");
 
         assert_eq!(target, JointTarget::new([1.0, 2.0, 3.0, 4.0, 5.0, 6.0]));
         assert_eq!(arm.latest_joint_target().unwrap().positions[5], 6.0);
+    }
+
+    #[tokio::test]
+    async fn entering_command_following_seeds_hold_position_target() {
+        let Some(arm) = arm() else {
+            return;
+        };
+        let feedback = ArmJointFeedback {
+            positions: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6],
+            velocities: [0.0; 6],
+            torques: [0.0; 6],
+            valid: true,
+            timestamp_millis: 0,
+        };
+        *arm.latest_feedback.write().expect("latest feedback lock poisoned") = Some(feedback.clone());
+
+        arm.set_state(ArmState::CommandFollowing)
+            .await
+            .expect("state transition should succeed");
+
+        assert_eq!(arm.latest_joint_target().unwrap(), JointTarget::new(feedback.positions));
+    }
+
+    #[tokio::test]
+    async fn stale_command_following_holds_current_positions() {
+        let Some(arm) = arm() else {
+            return;
+        };
+        let feedback = ArmJointFeedback {
+            positions: [0.1, -0.2, 0.3, -0.4, 0.5, -0.6],
+            velocities: [0.0; 6],
+            torques: [0.0; 6],
+            valid: true,
+            timestamp_millis: 0,
+        };
+        *arm.latest_feedback.write().expect("latest feedback lock poisoned") = Some(feedback.clone());
+
+        arm.set_state(ArmState::CommandFollowing)
+            .await
+            .expect("state transition should succeed");
+        arm.submit_joint_target([1.0, 1.1, 1.2, 1.3, 1.4, 1.5])
+            .expect("joint target should be accepted");
+
+        std::thread::sleep(super::STALE_COMMAND_THRESHOLD + std::time::Duration::from_millis(20));
+
+        let frames = arm
+            .command_following_frames()
+            .expect("command-following frames should build");
+
+        assert_positions_close(decode_command_positions(&frames), feedback.positions);
+    }
+
+    #[test]
+    fn dm_activation_frames_enable_each_joint_and_restore_control_mode() {
+        let Some(arm) = arm() else {
+            return;
+        };
+        let frames = arm
+            .build_dm_activation_frames()
+            .expect("DM activation frames should build");
+
+        let expected = (4_u16..=6_u16)
+            .flat_map(|motor_id| {
+                let protocol = DmProtocol::new(motor_id);
+                let mut frames = protocol.generate_enable().expect("enable frame should build");
+                frames.extend(
+                    protocol
+                        .generate_param_set("control_mode", &ParamValue::U32(0x01))
+                        .expect("control mode frame should build"),
+                );
+                frames
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(frames, expected);
+    }
+
+    #[test]
+    fn dm_disable_frames_target_only_dm_joints() {
+        let Some(arm) = arm() else {
+            return;
+        };
+        let frames = arm.build_dm_disable_frames().expect("DM disable frames should build");
+        let expected = vec![
+            RawCanFrame::new(4, &[0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFD]).unwrap(),
+            RawCanFrame::new(5, &[0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFD]).unwrap(),
+            RawCanFrame::new(6, &[0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFD]).unwrap(),
+        ];
+
+        assert_eq!(frames, expected);
     }
 
     #[tokio::test]

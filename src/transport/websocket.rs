@@ -266,7 +266,7 @@ async fn handle_connection(
                                     }).await?;
                                     continue;
                                 }
-                                if let Err(err) = client.set_arm_state(state) {
+                                if let Err(err) = client.set_arm_state(state).await {
                                     send_json(&mut ws, &ServerMessage::Error {
                                         request_id: None,
                                         message: err.to_string(),

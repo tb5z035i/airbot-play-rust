@@ -44,6 +44,7 @@ pub struct ConnectedRobotInfo {
     pub interface: String,
     pub access_mode: AccessMode,
     pub mounted_eef: MountedEefType,
+    pub model_backend: ModelBackendKind,
     pub gravity_coefficients: [f64; 6],
 }
 
@@ -79,52 +80,99 @@ pub struct AirbotPlayClient {
 
 impl AirbotPlayClient {
     pub async fn connect_readonly(interface: impl Into<String>) -> Result<Self, ClientError> {
-        Self::connect_with_backend(interface, AccessMode::Readonly, CanWorkerBackend::AsyncFd).await
+        Self::connect_with_backends(
+            interface,
+            AccessMode::Readonly,
+            CanWorkerBackend::AsyncFd,
+            ModelBackendKind::PlayAnalytical,
+        )
+        .await
     }
 
     pub async fn connect_control(interface: impl Into<String>) -> Result<Self, ClientError> {
-        Self::connect_with_backend(interface, AccessMode::Control, CanWorkerBackend::AsyncFd).await
+        Self::connect_with_backends(
+            interface,
+            AccessMode::Control,
+            CanWorkerBackend::AsyncFd,
+            ModelBackendKind::PlayAnalytical,
+        )
+        .await
     }
 
     pub async fn connect_readonly_with_backend(
         interface: impl Into<String>,
         backend: CanWorkerBackend,
     ) -> Result<Self, ClientError> {
-        Self::connect_with_backend(interface, AccessMode::Readonly, backend).await
+        Self::connect_with_backends(
+            interface,
+            AccessMode::Readonly,
+            backend,
+            ModelBackendKind::PlayAnalytical,
+        )
+        .await
     }
 
     pub async fn connect_control_with_backend(
         interface: impl Into<String>,
         backend: CanWorkerBackend,
     ) -> Result<Self, ClientError> {
-        Self::connect_with_backend(interface, AccessMode::Control, backend).await
+        Self::connect_with_backends(
+            interface,
+            AccessMode::Control,
+            backend,
+            ModelBackendKind::PlayAnalytical,
+        )
+        .await
+    }
+
+    pub async fn connect_readonly_with_backends(
+        interface: impl Into<String>,
+        can_backend: CanWorkerBackend,
+        model_backend: ModelBackendKind,
+    ) -> Result<Self, ClientError> {
+        Self::connect_with_backends(interface, AccessMode::Readonly, can_backend, model_backend)
+            .await
+    }
+
+    pub async fn connect_control_with_backends(
+        interface: impl Into<String>,
+        can_backend: CanWorkerBackend,
+        model_backend: ModelBackendKind,
+    ) -> Result<Self, ClientError> {
+        Self::connect_with_backends(interface, AccessMode::Control, can_backend, model_backend)
+            .await
     }
 
     pub async fn connect(
         interface: impl Into<String>,
         access_mode: AccessMode,
     ) -> Result<Self, ClientError> {
-        Self::connect_with_backend(interface, access_mode, CanWorkerBackend::AsyncFd).await
+        Self::connect_with_backends(
+            interface,
+            access_mode,
+            CanWorkerBackend::AsyncFd,
+            ModelBackendKind::PlayAnalytical,
+        )
+        .await
     }
 
-    pub async fn connect_with_backend(
+    pub async fn connect_with_backends(
         interface: impl Into<String>,
         access_mode: AccessMode,
-        backend: CanWorkerBackend,
+        can_backend: CanWorkerBackend,
+        model_backend: ModelBackendKind,
     ) -> Result<Self, ClientError> {
         let interface = interface.into();
         let request_service = RequestService::default();
         let worker = CanWorker::open(CanWorkerConfig {
             interface: interface.clone(),
-            backend,
+            backend: can_backend,
             ..CanWorkerConfig::default()
         })?;
         let bootstrap = PlayArm::bootstrap(worker.as_ref()).await?;
 
-        let control_model =
-            ModelRegistry::load(ModelBackendKind::Pinocchio, bootstrap.mounted_eef.clone())?;
-        let ik_model =
-            ModelRegistry::load(ModelBackendKind::Pinocchio, bootstrap.mounted_eef.clone())?;
+        let control_model = ModelRegistry::load(model_backend, bootstrap.mounted_eef.clone())?;
+        let ik_model = ModelRegistry::load(model_backend, bootstrap.mounted_eef.clone())?;
         let warning_bus = WarningBus::default();
         let (frame_router, mut routes) = CanFrameRouter::new(
             Arc::clone(&worker),
@@ -186,6 +234,7 @@ impl AirbotPlayClient {
                 interface,
                 access_mode,
                 mounted_eef: bootstrap.mounted_eef,
+                model_backend,
                 gravity_coefficients: bootstrap.gravity_coefficients,
             },
             request_service,
@@ -564,6 +613,7 @@ mod tests {
     use super::{
         AccessMode, ConnectedRobotInfo, build_shutdown_disable_frames, extract_gravity_coefficients,
     };
+    use crate::model::ModelBackendKind;
     use crate::request_service::RequestOutcome;
     use crate::types::{DecodedFrame, FrameKind, ParamValue, ProtocolNode, ProtocolNodeKind};
     use std::collections::BTreeMap;
@@ -606,6 +656,7 @@ mod tests {
             interface: "can0".to_owned(),
             access_mode: AccessMode::Control,
             mounted_eef: crate::model::MountedEefType::E2B,
+            model_backend: ModelBackendKind::Pinocchio,
             gravity_coefficients: [0.6, 0.6, 0.6, 1.338, 1.236, 0.893],
         };
 

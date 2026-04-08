@@ -38,9 +38,9 @@ from airbot_play_test_common import (
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="End-effector linear move test")
     add_connection_args(parser)
-    parser.add_argument("--start-x", type=float, default=0.40, help="Start pose X in meters (default: 0.20)")
+    parser.add_argument("--start-x", type=float, default=0.30, help="Start pose X in meters (default: 0.20)")
     parser.add_argument("--start-y", type=float, default=0.0, help="Start pose Y in meters (default: 0.0)")
-    parser.add_argument("--start-z", type=float, default=0.40, help="Start pose Z in meters (default: 0.30)")
+    parser.add_argument("--start-z", type=float, default=0.20, help="Start pose Z in meters (default: 0.30)")
     parser.add_argument("--end-z", type=float, default=0.60, help="Final pose Z in meters (default: 0.45)")
     parser.add_argument(
         "--move-to-start-duration",

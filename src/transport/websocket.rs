@@ -2,7 +2,7 @@ use crate::arm::{ArmJointFeedback, ArmState, JointTarget};
 use crate::can::worker::CanWorkerBackend;
 use crate::client::{AccessMode, AirbotPlayClient, ClientError, ConnectedRobotInfo, RequestTarget};
 use crate::eef::{EefState, SingleEefCommand, SingleEefFeedback};
-use crate::model::{MountedEefType, Pose};
+use crate::model::{ModelBackendKind, MountedEefType, Pose};
 use crate::request_service::RequestOutcome;
 use crate::warnings::WarningEvent;
 use futures_util::{Sink, SinkExt, StreamExt};
@@ -24,6 +24,7 @@ pub struct WebSocketServerConfig {
     pub interface: String,
     pub allow_control: bool,
     pub can_backend: CanWorkerBackend,
+    pub model_backend: ModelBackendKind,
 }
 
 impl Default for WebSocketServerConfig {
@@ -33,6 +34,7 @@ impl Default for WebSocketServerConfig {
             interface: "can0".to_owned(),
             allow_control: true,
             can_backend: CanWorkerBackend::AsyncFd,
+            model_backend: ModelBackendKind::PlayAnalytical,
         }
     }
 }
@@ -144,12 +146,17 @@ pub async fn run_websocket_server(
     config: WebSocketServerConfig,
 ) -> Result<(), WebSocketServerError> {
     let client = Arc::new(if config.allow_control {
-        AirbotPlayClient::connect_control_with_backend(config.interface.clone(), config.can_backend)
-            .await?
-    } else {
-        AirbotPlayClient::connect_readonly_with_backend(
+        AirbotPlayClient::connect_control_with_backends(
             config.interface.clone(),
             config.can_backend,
+            config.model_backend,
+        )
+        .await?
+    } else {
+        AirbotPlayClient::connect_readonly_with_backends(
+            config.interface.clone(),
+            config.can_backend,
+            config.model_backend,
         )
         .await?
     });
@@ -160,6 +167,7 @@ pub async fn run_websocket_server(
         interface = %config.interface,
         allow_control = config.allow_control,
         can_backend = ?config.can_backend,
+        model_backend = ?config.model_backend,
         "AIRBOT Play websocket server listening"
     );
 
@@ -521,7 +529,7 @@ fn require_control(mode: AccessMode) -> Result<(), ClientError> {
 mod tests {
     use super::{ClientMessage, ServerMessage};
     use crate::client::{AccessMode, ConnectedRobotInfo};
-    use crate::model::{MountedEefType, Pose};
+    use crate::model::{ModelBackendKind, MountedEefType, Pose};
 
     #[test]
     fn hello_message_roundtrips() {
@@ -542,6 +550,7 @@ mod tests {
                 interface: "can0".to_owned(),
                 access_mode: AccessMode::Control,
                 mounted_eef: MountedEefType::E2B,
+                model_backend: ModelBackendKind::PlayAnalytical,
                 gravity_coefficients: [0.6, 0.6, 0.6, 1.338, 1.236, 0.893],
             },
             connection_mode: AccessMode::Readonly,
@@ -551,6 +560,7 @@ mod tests {
         let json = serde_json::to_string(&message).expect("expected connected message JSON");
         assert!(json.contains("\"type\":\"connected\""));
         assert!(json.contains("\"control_allowed\":true"));
+        assert!(json.contains("\"model_backend\":\"play_analytical\""));
     }
 
     #[test]

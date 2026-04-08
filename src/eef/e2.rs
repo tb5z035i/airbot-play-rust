@@ -1,7 +1,7 @@
 use super::{EefState, SingleEefCommand, SingleEefFeedback};
+use crate::protocol::motor::MotorProtocol;
 use crate::protocol::motor::od::OdProtocol;
 use crate::types::{DecodedFrame, MotorCommand, MotorState, ProtocolNodeKind, RawCanFrame};
-use crate::protocol::motor::MotorProtocol;
 use std::sync::{Mutex, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
@@ -67,15 +67,16 @@ impl E2 {
             .lock()
             .expect("E2 protocol lock poisoned")
             .inspect(frame);
-        if let Some(DecodedFrame::MotionFeedback { node, state }) = decoded {
-            if node.kind == ProtocolNodeKind::OdMotor && node.id == self.motor_id {
-                let feedback = self.feedback_from_motor_state(&state);
-                *self
-                    .latest_feedback
-                    .write()
-                    .expect("E2 feedback lock poisoned") = Some(feedback.clone());
-                let _ = self.feedback_tx.send(feedback);
-            }
+        if let Some(DecodedFrame::MotionFeedback { node, state }) = decoded
+            && node.kind == ProtocolNodeKind::OdMotor
+            && node.id == self.motor_id
+        {
+            let feedback = self.feedback_from_motor_state(&state);
+            *self
+                .latest_feedback
+                .write()
+                .expect("E2 feedback lock poisoned") = Some(feedback.clone());
+            let _ = self.feedback_tx.send(feedback);
         }
     }
 
@@ -93,7 +94,10 @@ impl E2 {
         }
     }
 
-    pub fn build_mit_command(&self, command: &SingleEefCommand) -> Result<Vec<RawCanFrame>, E2Error> {
+    pub fn build_mit_command(
+        &self,
+        command: &SingleEefCommand,
+    ) -> Result<Vec<RawCanFrame>, E2Error> {
         if self.state() != EefState::Enabled {
             return Err(E2Error::Disabled);
         }

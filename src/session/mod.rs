@@ -6,7 +6,7 @@ use crate::warnings::{WarningEvent, WarningKind};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 use thiserror::Error;
-use tokio::sync::{broadcast, Mutex as AsyncMutex};
+use tokio::sync::{Mutex as AsyncMutex, broadcast};
 use tokio::task::JoinHandle;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -171,7 +171,12 @@ impl SessionRouter {
     }
 
     pub fn stop(&self) {
-        if let Some(task) = self.task.lock().expect("session task mutex poisoned").take() {
+        if let Some(task) = self
+            .task
+            .lock()
+            .expect("session task mutex poisoned")
+            .take()
+        {
             task.abort();
         }
     }
@@ -179,7 +184,12 @@ impl SessionRouter {
 
 impl Drop for SessionRouter {
     fn drop(&mut self) {
-        if let Some(task) = self.task.get_mut().expect("session task mutex poisoned").take() {
+        if let Some(task) = self
+            .task
+            .get_mut()
+            .expect("session task mutex poisoned")
+            .take()
+        {
             task.abort();
         }
     }

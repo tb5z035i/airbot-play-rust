@@ -32,7 +32,8 @@ pub fn set_current_thread_affinity(core_id: usize) -> io::Result<()> {
         libc::CPU_SET(core_id, &mut cpu_set);
     }
 
-    let result = unsafe { pthread_setaffinity_np(pthread_self(), mem::size_of::<cpu_set_t>(), &cpu_set) };
+    let result =
+        unsafe { pthread_setaffinity_np(pthread_self(), mem::size_of::<cpu_set_t>(), &cpu_set) };
     if result == 0 {
         Ok(())
     } else {

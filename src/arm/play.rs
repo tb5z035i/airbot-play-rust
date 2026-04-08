@@ -1,7 +1,9 @@
 use super::command_slot::{ARM_DOF, CommandSlot, JointTarget};
 use crate::can::realtime::{configure_sched_fifo, lock_memory, set_current_thread_affinity};
 use crate::can::worker::{CanTxPriority, CanWorker, CanWorkerError};
-use crate::model::{KinematicsDynamicsBackend, ModelError, MountedEefType, Pose, gravity_coefficients_for_eef};
+use crate::model::{
+    KinematicsDynamicsBackend, ModelError, MountedEefType, Pose, gravity_coefficients_for_eef,
+};
 use crate::motor::MotorRuntime;
 use crate::protocol::board::BoardProtocol;
 use crate::protocol::board::play_base::PlayBaseBoardProtocol;
@@ -177,7 +179,9 @@ impl PlayArm {
             .generate_param_get("gravity_comp_param")
             .map_err(|err| PlayArmError::Model(ModelError::Backend(err.to_string())))?;
         let gravity_outcome = request_service
-            .exchange_via_worker(worker, &gravity_frames, |frame| base_protocol.inspect(frame))
+            .exchange_via_worker(worker, &gravity_frames, |frame| {
+                base_protocol.inspect(frame)
+            })
             .await?;
         let gravity_coefficients = extract_gravity_coefficients(&gravity_outcome)
             .and_then(|values| values.get(mounted_eef.as_label()).copied())
@@ -309,7 +313,10 @@ impl PlayArm {
         Ok(frames)
     }
 
-    pub fn submit_joint_target(&self, positions: [f64; ARM_DOF]) -> Result<JointTarget, PlayArmError> {
+    pub fn submit_joint_target(
+        &self,
+        positions: [f64; ARM_DOF],
+    ) -> Result<JointTarget, PlayArmError> {
         if self.state() != ArmState::CommandFollowing {
             return Err(PlayArmError::InvalidControlState);
         }
@@ -324,13 +331,22 @@ impl PlayArm {
             return Err(PlayArmError::InvalidControlState);
         }
 
-        let seed = self.latest_feedback().map(|feedback| feedback.positions.to_vec());
+        let seed = self
+            .latest_feedback()
+            .map(|feedback| feedback.positions.to_vec());
         let seed = seed.as_deref();
         let joints = self.ik_model.inverse_kinematics(pose, seed)?;
         let target = JointTarget::from_slice(&joints)
             .map_err(|err| PlayArmError::Model(ModelError::Backend(err.to_string())))?;
         self.command_slot.set(target.clone());
         Ok(target)
+    }
+
+    pub fn current_pose(&self) -> Result<Pose, PlayArmError> {
+        let feedback = self
+            .latest_feedback()
+            .ok_or(PlayArmError::MissingFeedback)?;
+        Ok(self.control_model.forward_kinematics(&feedback.positions)?)
     }
 
     pub fn start(
@@ -344,13 +360,8 @@ impl PlayArm {
 
         handles.tasks.push(tokio::spawn(async move {
             let mut board_runtime = BoardRuntime::default();
-            loop {
-                match arm_rx.recv().await {
-                    Some(frame) => {
-                        board_runtime.handle_raw_frame(&frame);
-                    }
-                    None => break,
-                }
+            while let Some(frame) = arm_rx.recv().await {
+                board_runtime.handle_raw_frame(&frame);
             }
         }));
 
@@ -498,7 +509,10 @@ impl PlayArm {
                         ),
                     )
                     .with_interface(self.interface.clone())
-                    .with_detail("elapsed_ms", format!("{:.3}", elapsed.as_secs_f64() * 1000.0))
+                    .with_detail(
+                        "elapsed_ms",
+                        format!("{:.3}", elapsed.as_secs_f64() * 1000.0),
+                    )
                     .with_detail(
                         "budget_ms",
                         format!("{:.3}", CONTROL_PERIOD.as_secs_f64() * 1000.0),
@@ -529,7 +543,9 @@ impl PlayArm {
     }
 
     fn free_drive_frames(&self) -> Result<Vec<RawCanFrame>, PlayArmError> {
-        let feedback = self.latest_feedback().ok_or(PlayArmError::MissingFeedback)?;
+        let feedback = self
+            .latest_feedback()
+            .ok_or(PlayArmError::MissingFeedback)?;
         let gravity = self.gravity_compensation(&feedback.positions)?;
 
         self.encode_mit_commands((0..ARM_DOF).map(|index| MotorCommand {
@@ -543,9 +559,14 @@ impl PlayArm {
     }
 
     fn command_following_frames(&self) -> Result<Vec<RawCanFrame>, PlayArmError> {
-        let feedback = self.latest_feedback().ok_or(PlayArmError::MissingFeedback)?;
+        let feedback = self
+            .latest_feedback()
+            .ok_or(PlayArmError::MissingFeedback)?;
         let gravity = self.gravity_compensation(&feedback.positions)?;
-        let target = self.command_slot.latest().ok_or(PlayArmError::MissingFeedback)?;
+        let target = self
+            .command_slot
+            .latest()
+            .ok_or(PlayArmError::MissingFeedback)?;
         let target_positions = if target.age > STALE_COMMAND_THRESHOLD {
             self.maybe_publish_stale_command_warning(target.age);
             feedback.positions
@@ -563,7 +584,10 @@ impl PlayArm {
         }))
     }
 
-    fn gravity_compensation(&self, joints: &[f64; ARM_DOF]) -> Result<[f64; ARM_DOF], PlayArmError> {
+    fn gravity_compensation(
+        &self,
+        joints: &[f64; ARM_DOF],
+    ) -> Result<[f64; ARM_DOF], PlayArmError> {
         let velocities = [0.0; ARM_DOF];
         let accelerations = [0.0; ARM_DOF];
         let torques = self
@@ -684,23 +708,33 @@ impl Drop for PlayArm {
 }
 
 fn extract_u32(outcome: &RequestOutcome) -> Option<u32> {
-    outcome.decoded_frames.iter().find_map(|decoded| match decoded {
-        DecodedFrame::ParamResponse { values, .. } => values.values().find_map(|value| match value {
-            ParamValue::U32(value) => Some(*value),
+    outcome
+        .decoded_frames
+        .iter()
+        .find_map(|decoded| match decoded {
+            DecodedFrame::ParamResponse { values, .. } => {
+                values.values().find_map(|value| match value {
+                    ParamValue::U32(value) => Some(*value),
+                    _ => None,
+                })
+            }
             _ => None,
-        }),
-        _ => None,
-    })
+        })
 }
 
 fn extract_gravity_coefficients(outcome: &RequestOutcome) -> Option<BTreeMap<String, [f64; 6]>> {
-    let values = outcome.decoded_frames.iter().find_map(|decoded| match decoded {
-        DecodedFrame::ParamResponse { values, .. } => values.values().find_map(|value| match value {
-            ParamValue::FloatVec(values) if values.len() >= 24 => Some(values.clone()),
+    let values = outcome
+        .decoded_frames
+        .iter()
+        .find_map(|decoded| match decoded {
+            DecodedFrame::ParamResponse { values, .. } => {
+                values.values().find_map(|value| match value {
+                    ParamValue::FloatVec(values) if values.len() >= 24 => Some(values.clone()),
+                    _ => None,
+                })
+            }
             _ => None,
-        }),
-        _ => None,
-    })?;
+        })?;
 
     let mut by_eef = BTreeMap::new();
     for (label, chunk) in [
@@ -720,7 +754,9 @@ fn extract_gravity_coefficients(outcome: &RequestOutcome) -> Option<BTreeMap<Str
 
 #[cfg(test)]
 mod tests {
-    use super::{ArmBootstrapInfo, ArmJointFeedback, ArmState, PlayArm, extract_gravity_coefficients};
+    use super::{
+        ArmBootstrapInfo, ArmJointFeedback, ArmState, PlayArm, extract_gravity_coefficients,
+    };
     use crate::arm::command_slot::JointTarget;
     use crate::can::worker::CanWorker;
     use crate::model::{KinematicsDynamicsBackend, ModelError, MountedEefType, Pose};
@@ -729,7 +765,9 @@ mod tests {
     use crate::protocol::motor::dm::DmProtocol;
     use crate::protocol::motor::od::OdProtocol;
     use crate::request_service::RequestOutcome;
-    use crate::types::{DecodedFrame, FrameKind, ParamValue, ProtocolNode, ProtocolNodeKind, RawCanFrame};
+    use crate::types::{
+        DecodedFrame, FrameKind, ParamValue, ProtocolNode, ProtocolNodeKind, RawCanFrame,
+    };
     use crate::warning_bus::WarningBus;
     use std::collections::BTreeMap;
     use std::sync::{Arc, Mutex};
@@ -760,7 +798,11 @@ mod tests {
             Pose::from_slice(&[joints[0], joints[1], joints[2], 0.0, 0.0, 0.0, 1.0])
         }
 
-        fn inverse_kinematics(&self, _target: &Pose, _seed: Option<&[f64]>) -> Result<Vec<f64>, ModelError> {
+        fn inverse_kinematics(
+            &self,
+            _target: &Pose,
+            _seed: Option<&[f64]>,
+        ) -> Result<Vec<f64>, ModelError> {
             Ok(self.ik_result.lock().expect("dummy IK lock").clone())
         }
 
@@ -825,7 +867,10 @@ mod tests {
 
     fn assert_positions_close(actual: [f64; 6], expected: [f64; 6]) {
         for (actual, expected) in actual.into_iter().zip(expected) {
-            assert!((actual - expected).abs() < 0.002, "expected {expected}, got {actual}");
+            assert!(
+                (actual - expected).abs() < 0.002,
+                "expected {expected}, got {actual}"
+            );
         }
     }
 
@@ -848,7 +893,9 @@ mod tests {
             .expect("state transition should succeed");
 
         let pose = Pose::from_slice(&[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]).unwrap();
-        let target = arm.submit_task_target(&pose).expect("task target should succeed");
+        let target = arm
+            .submit_task_target(&pose)
+            .expect("task target should succeed");
 
         assert_eq!(target, JointTarget::new([1.0, 2.0, 3.0, 4.0, 5.0, 6.0]));
         assert_eq!(arm.latest_joint_target().unwrap().positions[5], 6.0);
@@ -866,13 +913,42 @@ mod tests {
             valid: true,
             timestamp_millis: 0,
         };
-        *arm.latest_feedback.write().expect("latest feedback lock poisoned") = Some(feedback.clone());
+        *arm.latest_feedback
+            .write()
+            .expect("latest feedback lock poisoned") = Some(feedback.clone());
 
         arm.set_state(ArmState::CommandFollowing)
             .await
             .expect("state transition should succeed");
 
-        assert_eq!(arm.latest_joint_target().unwrap(), JointTarget::new(feedback.positions));
+        assert_eq!(
+            arm.latest_joint_target().unwrap(),
+            JointTarget::new(feedback.positions)
+        );
+    }
+
+    #[test]
+    fn current_pose_uses_latest_feedback_positions() {
+        let Some(arm) = arm() else {
+            return;
+        };
+        let feedback = ArmJointFeedback {
+            positions: [0.11, -0.22, 0.33, 0.0, 0.0, 0.0],
+            velocities: [0.0; 6],
+            torques: [0.0; 6],
+            valid: true,
+            timestamp_millis: 0,
+        };
+        *arm.latest_feedback
+            .write()
+            .expect("latest feedback lock poisoned") = Some(feedback);
+
+        let pose = arm
+            .current_pose()
+            .expect("current pose should be available");
+
+        assert_eq!(pose.translation, [0.11, -0.22, 0.33]);
+        assert_eq!(pose.rotation_xyzw, [0.0, 0.0, 0.0, 1.0]);
     }
 
     #[tokio::test]
@@ -887,7 +963,9 @@ mod tests {
             valid: true,
             timestamp_millis: 0,
         };
-        *arm.latest_feedback.write().expect("latest feedback lock poisoned") = Some(feedback.clone());
+        *arm.latest_feedback
+            .write()
+            .expect("latest feedback lock poisoned") = Some(feedback.clone());
 
         arm.set_state(ArmState::CommandFollowing)
             .await
@@ -916,7 +994,9 @@ mod tests {
         let expected = (4_u16..=6_u16)
             .flat_map(|motor_id| {
                 let protocol = DmProtocol::new(motor_id);
-                let mut frames = protocol.generate_enable().expect("enable frame should build");
+                let mut frames = protocol
+                    .generate_enable()
+                    .expect("enable frame should build");
                 frames.extend(
                     protocol
                         .generate_param_set("control_mode", &ParamValue::U32(0x01))
@@ -934,7 +1014,9 @@ mod tests {
         let Some(arm) = arm() else {
             return;
         };
-        let frames = arm.build_dm_disable_frames().expect("DM disable frames should build");
+        let frames = arm
+            .build_dm_disable_frames()
+            .expect("DM disable frames should build");
         let expected = vec![
             RawCanFrame::new(4, &[0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFD]).unwrap(),
             RawCanFrame::new(5, &[0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFD]).unwrap(),

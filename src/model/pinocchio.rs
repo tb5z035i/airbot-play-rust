@@ -55,7 +55,10 @@ impl KinematicsDynamicsBackend for PinocchioBackend {
     }
 
     fn dof(&self) -> usize {
-        self.inner.as_ref().map(|inner| inner.dof()).unwrap_or_default()
+        self.inner
+            .as_ref()
+            .map(|inner| inner.dof())
+            .unwrap_or_default()
     }
 
     fn forward_kinematics(&self, joints: &[f64]) -> Result<Pose, ModelError> {
@@ -71,7 +74,11 @@ impl KinematicsDynamicsBackend for PinocchioBackend {
         Pose::from_slice(&pose)
     }
 
-    fn inverse_kinematics(&self, target: &Pose, seed: Option<&[f64]>) -> Result<Vec<f64>, ModelError> {
+    fn inverse_kinematics(
+        &self,
+        target: &Pose,
+        seed: Option<&[f64]>,
+    ) -> Result<Vec<f64>, ModelError> {
         let seed = match seed {
             Some(values) => {
                 self.validate_len("IK seed", values)?;

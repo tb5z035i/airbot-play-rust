@@ -1,6 +1,6 @@
 use super::{EefState, SingleEefCommand, SingleEefFeedback};
-use crate::protocol::motor::dm::DmProtocol;
 use crate::protocol::motor::MotorProtocol;
+use crate::protocol::motor::dm::DmProtocol;
 use crate::types::{DecodedFrame, MotorCommand, MotorState, ProtocolNodeKind, RawCanFrame};
 use std::sync::{Mutex, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -71,15 +71,16 @@ impl G2 {
             .lock()
             .expect("G2 protocol lock poisoned")
             .inspect(frame);
-        if let Some(DecodedFrame::MotionFeedback { node, state }) = decoded {
-            if node.kind == ProtocolNodeKind::DmMotor && node.id == self.motor_id {
-                let feedback = self.feedback_from_motor_state(&state);
-                *self
-                    .latest_feedback
-                    .write()
-                    .expect("G2 feedback lock poisoned") = Some(feedback.clone());
-                let _ = self.feedback_tx.send(feedback);
-            }
+        if let Some(DecodedFrame::MotionFeedback { node, state }) = decoded
+            && node.kind == ProtocolNodeKind::DmMotor
+            && node.id == self.motor_id
+        {
+            let feedback = self.feedback_from_motor_state(&state);
+            *self
+                .latest_feedback
+                .write()
+                .expect("G2 feedback lock poisoned") = Some(feedback.clone());
+            let _ = self.feedback_tx.send(feedback);
         }
     }
 
@@ -97,7 +98,10 @@ impl G2 {
         }
     }
 
-    pub fn build_mit_command(&self, command: &SingleEefCommand) -> Result<Vec<RawCanFrame>, G2Error> {
+    pub fn build_mit_command(
+        &self,
+        command: &SingleEefCommand,
+    ) -> Result<Vec<RawCanFrame>, G2Error> {
         if self.state() != EefState::Enabled {
             return Err(G2Error::Disabled);
         }
@@ -120,7 +124,10 @@ impl G2 {
             .map_err(|err| G2Error::Protocol(err.to_string()))
     }
 
-    pub fn build_pvt_command(&self, command: &SingleEefCommand) -> Result<Vec<RawCanFrame>, G2Error> {
+    pub fn build_pvt_command(
+        &self,
+        command: &SingleEefCommand,
+    ) -> Result<Vec<RawCanFrame>, G2Error> {
         if self.state() != EefState::Enabled {
             return Err(G2Error::Disabled);
         }
@@ -147,7 +154,8 @@ impl G2 {
         let theta = MAPPING_THETA0 + motor_pos;
         let sin_theta = theta.sin();
         let cos_theta = theta.cos();
-        let root = (MAPPING_L2 * MAPPING_L2 - MAPPING_L1 * MAPPING_L1 * sin_theta * sin_theta).sqrt();
+        let root =
+            (MAPPING_L2 * MAPPING_L2 - MAPPING_L1 * MAPPING_L1 * sin_theta * sin_theta).sqrt();
 
         let eef_pos = 2.0 * (MAPPING_L1 * cos_theta + root - MAPPING_L3);
         let eef_vel = -motor_vel * MAPPING_L1 * sin_theta * (1.0 + MAPPING_L1 * cos_theta / root);
@@ -157,17 +165,18 @@ impl G2 {
 
     pub fn eef_to_motor(eef_pos: f64, eef_vel: f64, eef_eff: f64) -> (f64, f64, f64) {
         let slider = eef_pos / 2.0 + MAPPING_L3;
-        let cos_term =
-            (slider * slider + MAPPING_L1 * MAPPING_L1 - MAPPING_L2 * MAPPING_L2) / (2.0 * slider * MAPPING_L1);
+        let cos_term = (slider * slider + MAPPING_L1 * MAPPING_L1 - MAPPING_L2 * MAPPING_L2)
+            / (2.0 * slider * MAPPING_L1);
         let motor_pos = cos_term.acos() - MAPPING_THETA0;
 
         let theta = MAPPING_THETA0 + motor_pos;
         let sin_theta = theta.sin();
         let cos_theta = theta.cos();
-        let root = (MAPPING_L2 * MAPPING_L2 - MAPPING_L1 * MAPPING_L1 * sin_theta * sin_theta).sqrt();
+        let root =
+            (MAPPING_L2 * MAPPING_L2 - MAPPING_L1 * MAPPING_L1 * sin_theta * sin_theta).sqrt();
 
-        let motor_vel = -(eef_vel * root)
-            / (MAPPING_L1 * sin_theta * (root + MAPPING_L1 * cos_theta));
+        let motor_vel =
+            -(eef_vel * root) / (MAPPING_L1 * sin_theta * (root + MAPPING_L1 * cos_theta));
         let motor_eff = 2.0 * MAPPING_L1 * MAPPING_L2 * eef_eff / root;
         (motor_pos, motor_vel, motor_eff)
     }

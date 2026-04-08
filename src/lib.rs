@@ -14,8 +14,8 @@ pub mod types;
 pub mod warning_bus;
 pub mod warnings;
 
-pub use request_service::RequestService;
 pub use client::{AccessMode, AirbotPlayClient, ClientError, ConnectedRobotInfo, RequestTarget};
+pub use request_service::RequestService;
 pub use types::{
     DecodedFrame, DiscoveredInstance, FrameKind, MotorCommand, MotorState, ParamDefinition,
     ParamType, ParamValue, ProtocolNode, ProtocolNodeKind, RawCanFrame,

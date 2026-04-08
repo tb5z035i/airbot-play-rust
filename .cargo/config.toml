@@ -1,0 +1,6 @@
+# `cargo clippy` runs the clippy driver on every crate in the dependency graph. For this repo
+# (cxx + Pinocchio + Tokio), that is a lot of LLVM work. Prefer this alias for day-to-day runs:
+#   cargo clippy-local
+# It still *compiles* dependencies normally; it only skips linting them.
+[alias]
+clippy-local = "clippy --no-deps --all-targets"

@@ -54,16 +54,21 @@ impl CommandSlot {
     }
 
     pub fn clear(&self) {
-        self.inner.lock().expect("command slot mutex poisoned").take();
+        self.inner
+            .lock()
+            .expect("command slot mutex poisoned")
+            .take();
     }
 
     pub fn latest(&self) -> Option<CommandSlotSnapshot> {
         let guard = self.inner.lock().expect("command slot mutex poisoned");
-        guard.as_ref().map(|(target, updated_at)| CommandSlotSnapshot {
-            target: target.clone(),
-            updated_at: *updated_at,
-            age: updated_at.elapsed(),
-        })
+        guard
+            .as_ref()
+            .map(|(target, updated_at)| CommandSlotSnapshot {
+                target: target.clone(),
+                updated_at: *updated_at,
+                age: updated_at.elapsed(),
+            })
     }
 }
 

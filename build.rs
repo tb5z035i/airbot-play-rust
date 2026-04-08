@@ -1,5 +1,4 @@
 use std::env;
-use std::ffi::OsStr;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -9,13 +8,16 @@ fn main() {
     let dependency_prefix =
         find_pinocchio_dependency_prefix(&manifest_dir).expect("failed to locate Pinocchio deps");
 
-    emit_rerun_for_dir(&manifest_dir.join("ffi")).expect("failed to watch ffi dir");
-    emit_rerun_for_dir(&manifest_dir.join("third_party/pinocchio/include"))
-        .expect("failed to watch pinocchio headers");
-    emit_rerun_for_dir(&manifest_dir.join("third_party/pinocchio/cmake"))
-        .expect("failed to watch pinocchio cmake modules");
-    emit_rerun_for_dir(&manifest_dir.join("third_party/pinocchio/src"))
-        .expect("failed to watch pinocchio sources");
+    // One directory watch each: Cargo tracks subtree changes without emitting thousands of
+    // rerun-if-changed lines (recursive listing was ~1.3k paths and slowed every `cargo build`).
+    println!(
+        "cargo:rerun-if-changed={}",
+        manifest_dir.join("ffi").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        manifest_dir.join("third_party/pinocchio").display()
+    );
     println!("cargo:rerun-if-changed=src/model/pinocchio_ffi.rs");
     println!(
         "cargo:rerun-if-changed={}",
@@ -23,9 +25,7 @@ fn main() {
     );
     println!(
         "cargo:rerun-if-changed={}",
-        manifest_dir
-            .join("assets/urdf/play_e2.urdf")
-            .display()
+        manifest_dir.join("assets/urdf/play_e2.urdf").display()
     );
     println!(
         "cargo:rerun-if-changed={}",
@@ -47,13 +47,23 @@ fn main() {
         .flag_if_supported("-std=c++17")
         .compile("airbot_pinocchio_ffi");
 
-    println!("cargo:rustc-link-search=native={}", native_lib_dir.display());
-    println!("cargo:rustc-link-search=native={}", dependency_lib_dir.display());
+    println!(
+        "cargo:rustc-link-search=native={}",
+        native_lib_dir.display()
+    );
+    println!(
+        "cargo:rustc-link-search=native={}",
+        dependency_lib_dir.display()
+    );
     println!("cargo:rustc-link-lib=dylib=pinocchio_parsers");
     println!("cargo:rustc-link-lib=dylib=pinocchio_default");
 
     if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("linux") {
-        for scope in ["cargo:rustc-link-arg", "cargo:rustc-link-arg-tests", "cargo:rustc-link-arg-bins"] {
+        for scope in [
+            "cargo:rustc-link-arg",
+            "cargo:rustc-link-arg-tests",
+            "cargo:rustc-link-arg-bins",
+        ] {
             println!("{scope}=-Wl,-rpath,{}", native_lib_dir.display());
             println!("{scope}=-Wl,-rpath,{}", dependency_lib_dir.display());
         }
@@ -88,6 +98,8 @@ fn build_native(manifest_dir: &Path, dependency_prefix: &Path) -> PathBuf {
         .define("INSTALL_DOCUMENTATION", "OFF")
         .define("ENABLE_TEMPLATE_INSTANTIATION", "ON")
         .define("FETCHCONTENT_UPDATES_DISCONNECTED", "ON")
+        // Avoid printing one line per header on `cmake --install` (default is VERY noisy).
+        .define("CMAKE_INSTALL_MESSAGE", "LAZY")
         .env("CMAKE_BUILD_PARALLEL_LEVEL", parallel_jobs.to_string())
         .build_arg(format!("-j{parallel_jobs}"));
 
@@ -121,7 +133,13 @@ fn find_pinocchio_dependency_prefix(manifest_dir: &Path) -> io::Result<PathBuf> 
     if local_env.exists() {
         for lib_dir in fs::read_dir(local_env.join("lib"))? {
             let lib_dir = lib_dir?.path();
-            if !lib_dir.is_dir() || !lib_dir.file_name().unwrap_or_default().to_string_lossy().starts_with("python") {
+            if !lib_dir.is_dir()
+                || !lib_dir
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .starts_with("python")
+            {
                 continue;
             }
 
@@ -136,26 +154,4 @@ fn find_pinocchio_dependency_prefix(manifest_dir: &Path) -> io::Result<PathBuf> 
         io::ErrorKind::NotFound,
         "unable to locate Pinocchio dependency prefix; set AIRBOT_PINOCCHIO_DEP_PREFIX or create .pin-env with cmeel dependencies",
     ))
-}
-
-fn emit_rerun_for_dir(path: &Path) -> io::Result<()> {
-    if !path.exists() {
-        return Ok(());
-    }
-
-    if path.is_file() {
-        println!("cargo:rerun-if-changed={}", path.display());
-        return Ok(());
-    }
-
-    for entry in fs::read_dir(path)? {
-        let entry = entry?;
-        let child = entry.path();
-        if child.file_name() == Some(OsStr::new(".git")) {
-            continue;
-        }
-        emit_rerun_for_dir(&child)?;
-    }
-
-    Ok(())
 }

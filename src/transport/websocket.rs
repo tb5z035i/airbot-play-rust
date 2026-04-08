@@ -52,7 +52,9 @@ pub enum WebSocketServerError {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ClientMessage {
-    Hello { access_mode: AccessMode },
+    Hello {
+        access_mode: AccessMode,
+    },
     SubscribeArmFeedback,
     SubscribeWarnings,
     SubscribeEefFeedback,
@@ -61,15 +63,36 @@ enum ClientMessage {
         target: RequestTarget,
         name: String,
     },
-    QueryMountedEef { request_id: String },
-    QueryGravityCoefficients { request_id: String },
-    SetArmState { state: ArmState },
-    SubmitJointTarget { positions: [f64; 6] },
-    SubmitTaskTarget { pose: Pose },
-    SetEefState { state: EefState },
-    SubmitE2Command { command: SingleEefCommand },
-    SubmitG2MitCommand { command: SingleEefCommand },
-    SubmitG2PvtCommand { command: SingleEefCommand },
+    QueryMountedEef {
+        request_id: String,
+    },
+    QueryGravityCoefficients {
+        request_id: String,
+    },
+    QueryCurrentPose {
+        request_id: String,
+    },
+    SetArmState {
+        state: ArmState,
+    },
+    SubmitJointTarget {
+        positions: [f64; 6],
+    },
+    SubmitTaskTarget {
+        pose: Pose,
+    },
+    SetEefState {
+        state: EefState,
+    },
+    SubmitE2Command {
+        command: SingleEefCommand,
+    },
+    SubmitG2MitCommand {
+        command: SingleEefCommand,
+    },
+    SubmitG2PvtCommand {
+        command: SingleEefCommand,
+    },
 }
 
 #[derive(Debug, Serialize)]
@@ -104,6 +127,10 @@ enum ServerMessage {
         request_id: String,
         coefficients: BTreeMap<String, [f64; 6]>,
     },
+    CurrentPose {
+        request_id: String,
+        pose: Pose,
+    },
     JointTargetAccepted {
         target: JointTarget,
     },
@@ -113,11 +140,18 @@ enum ServerMessage {
     },
 }
 
-pub async fn run_websocket_server(config: WebSocketServerConfig) -> Result<(), WebSocketServerError> {
+pub async fn run_websocket_server(
+    config: WebSocketServerConfig,
+) -> Result<(), WebSocketServerError> {
     let client = Arc::new(if config.allow_control {
-        AirbotPlayClient::connect_control_with_backend(config.interface.clone(), config.can_backend).await?
+        AirbotPlayClient::connect_control_with_backend(config.interface.clone(), config.can_backend)
+            .await?
     } else {
-        AirbotPlayClient::connect_readonly_with_backend(config.interface.clone(), config.can_backend).await?
+        AirbotPlayClient::connect_readonly_with_backend(
+            config.interface.clone(),
+            config.can_backend,
+        )
+        .await?
     });
 
     let listener = TcpListener::bind(&config.bind_addr).await?;
@@ -249,6 +283,19 @@ async fn handle_connection(
                                             request_id,
                                             coefficients,
                                         }).await?;
+                                    }
+                                    Err(err) => {
+                                        send_json(&mut ws, &ServerMessage::Error {
+                                            request_id: Some(request_id),
+                                            message: err.to_string(),
+                                        }).await?;
+                                    }
+                                }
+                            }
+                            ClientMessage::QueryCurrentPose { request_id } => {
+                                match client.query_current_pose() {
+                                    Ok(pose) => {
+                                        send_json(&mut ws, &ServerMessage::CurrentPose { request_id, pose }).await?;
                                     }
                                     Err(err) => {
                                         send_json(&mut ws, &ServerMessage::Error {
@@ -474,14 +521,13 @@ fn require_control(mode: AccessMode) -> Result<(), ClientError> {
 mod tests {
     use super::{ClientMessage, ServerMessage};
     use crate::client::{AccessMode, ConnectedRobotInfo};
-    use crate::model::MountedEefType;
+    use crate::model::{MountedEefType, Pose};
 
     #[test]
     fn hello_message_roundtrips() {
-        let message = serde_json::from_str::<ClientMessage>(
-            r#"{"type":"hello","access_mode":"control"}"#,
-        )
-        .expect("expected hello message");
+        let message =
+            serde_json::from_str::<ClientMessage>(r#"{"type":"hello","access_mode":"control"}"#)
+                .expect("expected hello message");
 
         match message {
             ClientMessage::Hello { access_mode } => assert_eq!(access_mode, AccessMode::Control),
@@ -508,8 +554,36 @@ mod tests {
     }
 
     #[test]
+    fn query_current_pose_message_roundtrips() {
+        let message = serde_json::from_str::<ClientMessage>(
+            r#"{"type":"query_current_pose","request_id":"pose-1"}"#,
+        )
+        .expect("expected query_current_pose message");
+
+        match message {
+            ClientMessage::QueryCurrentPose { request_id } => assert_eq!(request_id, "pose-1"),
+            other => panic!("unexpected message: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn current_pose_message_serializes() {
+        let pose = Pose::from_slice(&[0.2, 0.0, 0.3, 0.0, 0.0, 0.0, 1.0]).expect("valid pose");
+        let message = ServerMessage::CurrentPose {
+            request_id: "pose-1".to_owned(),
+            pose,
+        };
+
+        let json = serde_json::to_string(&message).expect("expected current_pose message JSON");
+        assert!(json.contains("\"type\":\"current_pose\""));
+        assert!(json.contains("\"request_id\":\"pose-1\""));
+        assert!(json.contains("\"translation\":[0.2,0.0,0.3]"));
+    }
+
+    #[test]
     fn readonly_mode_rejects_control_operations() {
-        let error = super::require_control(AccessMode::Readonly).expect_err("readonly mode should reject control");
+        let error = super::require_control(AccessMode::Readonly)
+            .expect_err("readonly mode should reject control");
         assert!(error.to_string().contains("control permission"));
         assert!(super::require_control(AccessMode::Control).is_ok());
     }

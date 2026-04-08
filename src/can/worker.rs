@@ -168,7 +168,9 @@ impl CanWorker {
                 let interface = config.interface.clone();
                 let realtime = config.realtime.clone();
                 thread::spawn(move || {
-                    if let Err(err) = run_realtime_worker(&interface, realtime, command_rx, frames_tx) {
+                    if let Err(err) =
+                        run_realtime_worker(&interface, realtime, command_rx, frames_tx)
+                    {
                         warn!(error = %err, interface = %interface, "realtime CAN worker stopped");
                     }
                 });
@@ -235,7 +237,6 @@ impl CanWorker {
             frames_tx,
         })
     }
-
 }
 
 async fn run_asyncfd_worker(
@@ -284,24 +285,24 @@ fn run_realtime_worker(
     mut command_rx: mpsc::Receiver<WorkerCommand>,
     frames_tx: broadcast::Sender<RawCanFrame>,
 ) -> Result<(), CanWorkerError> {
-    if let Some(priority) = config.fifo_priority {
-        if let Err(err) = configure_sched_fifo(priority) {
-            warn!(error = %err, priority, "failed to configure SCHED_FIFO");
-        }
+    if let Some(priority) = config.fifo_priority
+        && let Err(err) = configure_sched_fifo(priority)
+    {
+        warn!(error = %err, priority, "failed to configure SCHED_FIFO");
     }
-    if config.lock_memory {
-        if let Err(err) = lock_memory() {
-            warn!(error = %err, "failed to lock memory for realtime worker");
-        }
+    if config.lock_memory
+        && let Err(err) = lock_memory()
+    {
+        warn!(error = %err, "failed to lock memory for realtime worker");
     }
-    if let Some(core_id) = config.cpu_affinity {
-        if let Err(err) = set_current_thread_affinity(core_id) {
-            warn!(error = %err, core_id, "failed to set CAN worker CPU affinity");
-        }
+    if let Some(core_id) = config.cpu_affinity
+        && let Err(err) = set_current_thread_affinity(core_id)
+    {
+        warn!(error = %err, core_id, "failed to set CAN worker CPU affinity");
     }
 
-    let socket =
-        socketcan::CanSocket::open(interface).map_err(|err| CanWorkerError::Io(SocketCanIoError::Io(err)))?;
+    let socket = socketcan::CanSocket::open(interface)
+        .map_err(|err| CanWorkerError::Io(SocketCanIoError::Io(err)))?;
     socket
         .set_write_timeout(Some(config.write_timeout))
         .map_err(|err| CanWorkerError::Io(SocketCanIoError::Io(err)))?;
@@ -369,7 +370,10 @@ fn is_nonfatal_socket_retry(err: &std::io::Error) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{CanTxIntent, CanTxPriority, TxQueues, WorkerCommand, apply_command, is_nonfatal_socket_retry};
+    use super::{
+        CanTxIntent, CanTxPriority, TxQueues, WorkerCommand, apply_command,
+        is_nonfatal_socket_retry,
+    };
     use crate::types::RawCanFrame;
     use std::io::ErrorKind;
 
@@ -410,7 +414,11 @@ mod tests {
             &mut queues,
             &mut shutdown_requested,
         );
-        apply_command(WorkerCommand::Shutdown, &mut queues, &mut shutdown_requested);
+        apply_command(
+            WorkerCommand::Shutdown,
+            &mut queues,
+            &mut shutdown_requested,
+        );
 
         assert!(shutdown_requested);
         assert!(!queues.is_empty());

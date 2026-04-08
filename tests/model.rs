@@ -45,7 +45,11 @@ fn gravity_coefficients_follow_eef_defaults() {
 
 #[test]
 fn pinocchio_backend_loads_and_exercises_core_model_ops() {
-    for mounted_eef in [MountedEefType::None, MountedEefType::E2B, MountedEefType::G2] {
+    for mounted_eef in [
+        MountedEefType::None,
+        MountedEefType::E2B,
+        MountedEefType::G2,
+    ] {
         let backend = ModelRegistry::load(ModelBackendKind::Pinocchio, mounted_eef.clone())
             .expect("expected Pinocchio backend to load");
 

@@ -89,7 +89,8 @@ impl CanFrameRouter {
                 match frames_rx.recv().await {
                     Ok(frame) => {
                         dispatch_arm_frame(&arm_tx, &frame).await;
-                        dispatch_motor_frame(&motor_txs, eef_motor_id, eef_tx.as_ref(), frame).await;
+                        dispatch_motor_frame(&motor_txs, eef_motor_id, eef_tx.as_ref(), frame)
+                            .await;
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
                     Err(broadcast::error::RecvError::Lagged(_)) => continue,
@@ -101,7 +102,12 @@ impl CanFrameRouter {
     }
 
     pub fn stop(&self) {
-        if let Some(task) = self.task.lock().expect("CAN router task mutex poisoned").take() {
+        if let Some(task) = self
+            .task
+            .lock()
+            .expect("CAN router task mutex poisoned")
+            .take()
+        {
             task.abort();
         }
     }
@@ -109,7 +115,12 @@ impl CanFrameRouter {
 
 impl Drop for CanFrameRouter {
     fn drop(&mut self) {
-        if let Some(task) = self.task.get_mut().expect("CAN router task mutex poisoned").take() {
+        if let Some(task) = self
+            .task
+            .get_mut()
+            .expect("CAN router task mutex poisoned")
+            .take()
+        {
             task.abort();
         }
     }
@@ -117,7 +128,7 @@ impl Drop for CanFrameRouter {
 
 async fn dispatch_arm_frame(arm_tx: &mpsc::Sender<RawCanFrame>, frame: &RawCanFrame) {
     if is_board_frame(frame.can_id) {
-        let _ = arm_tx.send(frame.clone()).await;
+        let _ = arm_tx.send(*frame).await;
     }
 }
 
@@ -132,10 +143,10 @@ async fn dispatch_motor_frame(
             let _ = tx.send(frame).await;
             return;
         }
-        if Some(motor_id) == eef_motor_id {
-            if let Some(tx) = eef_tx {
-                let _ = tx.send(frame).await;
-            }
+        if Some(motor_id) == eef_motor_id
+            && let Some(tx) = eef_tx
+        {
+            let _ = tx.send(frame).await;
         }
     }
 }
@@ -187,8 +198,9 @@ mod tests {
         motor_txs.insert(4, tx4);
         motor_txs.insert(5, tx5);
 
-        let frame = RawCanFrame::new(0x704, &[0x04, 0x80, 0x08, 0x7F, 0xD7, 0xFF, 0x1E, 0x1C]).unwrap();
-        dispatch_motor_frame(&motor_txs, None, None, frame.clone()).await;
+        let frame =
+            RawCanFrame::new(0x704, &[0x04, 0x80, 0x08, 0x7F, 0xD7, 0xFF, 0x1E, 0x1C]).unwrap();
+        dispatch_motor_frame(&motor_txs, None, None, frame).await;
 
         assert_eq!(rx4.recv().await.unwrap(), frame);
         assert!(rx5.try_recv().is_err());

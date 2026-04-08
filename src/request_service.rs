@@ -113,7 +113,7 @@ impl RequestService {
                 match frames_rx.recv().await {
                     Ok(routed) => {
                         if let Some(decoded) = inspect(&routed) {
-                            outcome.raw_frames.push(routed.raw_frame.clone());
+                            outcome.raw_frames.push(routed.raw_frame);
                             outcome.decoded_frames.push(decoded);
                             return Ok::<(), RequestError>(());
                         }
@@ -164,7 +164,7 @@ impl RequestService {
                 match frames_rx.recv().await {
                     Ok(frame) => {
                         let decoded = inspect(&frame);
-                        outcome.raw_frames.push(frame.clone());
+                        outcome.raw_frames.push(frame);
                         if let Some(decoded) = decoded {
                             outcome.decoded_frames.push(decoded);
                             return Ok::<(), RequestError>(());

@@ -144,7 +144,9 @@ impl RuntimeProtocol {
         match (self, name, value) {
             (Self::Dm(protocol), "pos_max", ParamValue::F32(value)) => protocol.set_pos_max(*value),
             (Self::Dm(protocol), "vel_max", ParamValue::F32(value)) => protocol.set_vel_max(*value),
-            (Self::Dm(protocol), "torque_max", ParamValue::F32(value)) => protocol.set_tor_max(*value),
+            (Self::Dm(protocol), "torque_max", ParamValue::F32(value)) => {
+                protocol.set_tor_max(*value)
+            }
             _ => {}
         }
     }
@@ -307,7 +309,6 @@ impl MotorRuntime {
             task.abort();
         }
     }
-
 }
 
 impl Drop for MotorRuntime {
@@ -351,11 +352,15 @@ impl MotorActor {
 
         let mut changed = false;
         match decoded {
-            DecodedFrame::MotionFeedback { node, state } if node.id == self.joint_id && node.kind == self.kind => {
+            DecodedFrame::MotionFeedback { node, state }
+                if node.id == self.joint_id && node.kind == self.kind =>
+            {
                 self.snapshot.state = Some(state);
                 changed = true;
             }
-            DecodedFrame::ParamResponse { node, values, .. } if node.id == self.joint_id && node.kind == self.kind => {
+            DecodedFrame::ParamResponse { node, values, .. }
+                if node.id == self.joint_id && node.kind == self.kind =>
+            {
                 for (name, value) in values {
                     self.protocol.apply_param_update(&name, &value);
                     self.snapshot.params.insert(name, value);
@@ -478,7 +483,9 @@ impl MotorActor {
             .await?;
 
         self.set_phase(MotorLifecyclePhase::SettingMode);
-        let mode_frames = self.protocol.generate_param_set("control_mode", &ParamValue::U32(0x01))?;
+        let mode_frames = self
+            .protocol
+            .generate_param_set("control_mode", &ParamValue::U32(0x01))?;
         self.worker
             .send_frames(CanTxPriority::Lifecycle, mode_frames)
             .await?;
@@ -615,19 +622,32 @@ mod tests {
         actor.handle_raw_frame(&od_param_response_frame(1, 0xE2, -0.25));
         actor.handle_raw_frame(&od_param_response_frame(1, 0xE3, 0.75));
 
-        let state = actor.snapshot.state.expect("OD runtime should seed initial state");
+        let state = actor
+            .snapshot
+            .state
+            .expect("OD runtime should seed initial state");
         assert!((state.pos - 1.5).abs() < 1e-6);
         assert!((state.vel + 0.25).abs() < 1e-6);
         assert!((state.eff - 0.75).abs() < 1e-6);
-        assert_eq!(actor.snapshot.params.get("position"), Some(&ParamValue::F32(1.5)));
-        assert_eq!(actor.snapshot.params.get("velocity"), Some(&ParamValue::F32(-0.25)));
-        assert_eq!(actor.snapshot.params.get("torque"), Some(&ParamValue::F32(0.75)));
+        assert_eq!(
+            actor.snapshot.params.get("position"),
+            Some(&ParamValue::F32(1.5))
+        );
+        assert_eq!(
+            actor.snapshot.params.get("velocity"),
+            Some(&ParamValue::F32(-0.25))
+        );
+        assert_eq!(
+            actor.snapshot.params.get("torque"),
+            Some(&ParamValue::F32(0.75))
+        );
     }
 
     #[test]
     fn dm_disable_trace_frame_seeds_state() {
         let mut actor = dm_actor(4);
-        let frame = RawCanFrame::new(0x704, &[0x04, 0x80, 0x08, 0x7F, 0xD7, 0xFF, 0x1E, 0x1C]).unwrap();
+        let frame =
+            RawCanFrame::new(0x704, &[0x04, 0x80, 0x08, 0x7F, 0xD7, 0xFF, 0x1E, 0x1C]).unwrap();
 
         actor.handle_raw_frame(&frame);
 
@@ -651,7 +671,8 @@ mod tests {
         actor.handle_raw_frame(&dm_param_response_frame(4, 0x16, 12.0));
         actor.handle_raw_frame(&dm_param_response_frame(4, 0x17, 5.0));
 
-        let frame = RawCanFrame::new(0x704, &[0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00]).unwrap();
+        let frame =
+            RawCanFrame::new(0x704, &[0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00]).unwrap();
         actor.handle_raw_frame(&frame);
 
         let state = actor
@@ -661,9 +682,18 @@ mod tests {
         assert!((state.pos - 6.0).abs() < 1e-3);
         assert!((state.vel - 12.0).abs() < 1e-3);
         assert!((state.eff - 5.0).abs() < 1e-3);
-        assert_eq!(actor.snapshot.params.get("pos_max"), Some(&ParamValue::F32(6.0)));
-        assert_eq!(actor.snapshot.params.get("vel_max"), Some(&ParamValue::F32(12.0)));
-        assert_eq!(actor.snapshot.params.get("torque_max"), Some(&ParamValue::F32(5.0)));
+        assert_eq!(
+            actor.snapshot.params.get("pos_max"),
+            Some(&ParamValue::F32(6.0))
+        );
+        assert_eq!(
+            actor.snapshot.params.get("vel_max"),
+            Some(&ParamValue::F32(12.0))
+        );
+        assert_eq!(
+            actor.snapshot.params.get("torque_max"),
+            Some(&ParamValue::F32(5.0))
+        );
     }
 
     #[test]
@@ -673,12 +703,19 @@ mod tests {
 
         assert_eq!(
             od.bootstrap_params(),
-            vec!["position".to_owned(), "velocity".to_owned(), "torque".to_owned()]
+            vec![
+                "position".to_owned(),
+                "velocity".to_owned(),
+                "torque".to_owned()
+            ]
         );
         assert_eq!(
             dm.bootstrap_params(),
-            vec!["pos_max".to_owned(), "vel_max".to_owned(), "torque_max".to_owned()]
+            vec![
+                "pos_max".to_owned(),
+                "vel_max".to_owned(),
+                "torque_max".to_owned()
+            ]
         );
     }
 }
-

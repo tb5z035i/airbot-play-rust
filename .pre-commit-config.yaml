@@ -1,0 +1,45 @@
+repos:
+  # General file hygiene
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+        exclude: ^third_party/
+      - id: end-of-file-fixer
+        exclude: ^third_party/
+      - id: check-yaml
+        exclude: ^third_party/
+      - id: check-toml
+        exclude: ^third_party/
+      - id: check-merge-conflict
+
+  # Rust – format (auto-fix)
+  - repo: local
+    hooks:
+      - id: cargo-fmt
+        name: cargo fmt
+        language: system
+        entry: cargo fmt --all
+        types: [rust]
+        pass_filenames: false
+
+  # Rust – lint
+  - repo: local
+    hooks:
+      - id: cargo-clippy
+        name: cargo clippy
+        language: system
+        entry: cargo clippy --workspace -- -D warnings
+        types: [rust]
+        pass_filenames: false
+
+  # Rust – test
+  - repo: local
+    hooks:
+      - id: cargo-test
+        name: cargo test
+        language: system
+        entry: cargo test --workspace
+        types: [rust]
+        pass_filenames: false
+        stages: [pre-push]

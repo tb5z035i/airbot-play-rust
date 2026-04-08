@@ -1,1 +1,23 @@
+# Local reference trees and runtime logs
 references/
+logs/
+
+# Rust / Cargo (workspace: matches target/ at any depth)
+target/
+**/*.rs.bk
+*.pdb
+
+# IDE / editors
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local env; keep tracked examples if you add them
+.env
+.env.local
+!.env.example

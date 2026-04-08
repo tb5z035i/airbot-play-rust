@@ -1,0 +1,49 @@
+name: Build
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            cmake \
+            pkg-config \
+            patch \
+            libeigen3-dev \
+            libboost-filesystem-dev \
+            libboost-serialization-dev \
+            libboost-test-dev \
+            libconsole-bridge-dev \
+            libtinyxml2-dev \
+            liburdfdom-dev \
+            liburdfdom-headers-dev
+
+      - name: Apply vendored Pinocchio patch
+        run: |
+          patch --batch --dry-run -d third_party/pinocchio -p1 < patches/pinocchio-static-build.patch
+          patch --batch -d third_party/pinocchio -p1 < patches/pinocchio-static-build.patch
+
+      - name: Build all targets
+        run: cargo build --locked --all-targets

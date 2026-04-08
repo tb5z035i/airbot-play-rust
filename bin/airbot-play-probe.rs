@@ -1,5 +1,5 @@
 use airbot_play_rust::probe::discover::probe_all;
-use airbot_play_rust::types::DiscoveredInstance;
+use airbot_play_rust::types::{DiscoveredInstance, MotorSoftwareVersion};
 use airbot_play_rust::warnings::WarningEvent;
 use clap::Parser;
 use serde::Serialize;
@@ -70,28 +70,61 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn print_instance(index: usize, instance: &DiscoveredInstance) {
-    println!("[{}] {}", index, instance.interface);
-    println!(
-        "    Identity            : {}",
-        format_optional(instance.identified_as.as_deref())
-    );
-    println!(
-        "    Product SN          : {}",
-        format_optional(instance.product_sn.as_deref())
-    );
-    println!(
-        "    PCBA SN             : {}",
-        format_optional(instance.pcba_sn.as_deref())
-    );
-    println!(
-        "    Mounted EEF (board) : {}",
-        format_optional(instance.mounted_eef.as_deref())
-    );
+    println!("{}", format_instance(index, instance));
     println!();
+}
+
+fn format_instance(index: usize, instance: &DiscoveredInstance) -> String {
+    [
+        format!("[{}] {}", index, instance.interface),
+        format!(
+            "    Product SN          : {}",
+            format_optional(instance.product_sn.as_deref())
+        ),
+        format!(
+            "    PCBA SN             : {}",
+            format_optional(instance.pcba_sn.as_deref())
+        ),
+        format!(
+            "    Mounted EEF (board) : {}",
+            format_optional(instance.mounted_eef.as_deref())
+        ),
+        format!(
+            "    Base Board SW Ver   : {}",
+            format_optional(instance.base_board_software_version.as_deref())
+        ),
+        format!(
+            "    End Board SW Ver    : {}",
+            format_optional(instance.end_board_software_version.as_deref())
+        ),
+        format!(
+            "    Motor SW Versions   : {}",
+            format_motor_software_versions(&instance.motor_software_versions)
+        ),
+    ]
+    .join("\n")
 }
 
 fn format_optional(value: Option<&str>) -> &str {
     value.unwrap_or("unknown")
+}
+
+fn format_motor_software_versions(motor_versions: &[MotorSoftwareVersion]) -> String {
+    if motor_versions.is_empty() {
+        return "unknown".to_owned();
+    }
+
+    motor_versions
+        .iter()
+        .map(|motor| {
+            format!(
+                "J{}={}",
+                motor.joint_id,
+                format_optional(motor.software_version.as_deref())
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 #[derive(Debug, Serialize)]
@@ -102,4 +135,50 @@ struct StructuredProbeOutput<'a> {
     warning_count: usize,
     instances: &'a [DiscoveredInstance],
     warnings: &'a [WarningEvent],
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{format_instance, format_motor_software_versions};
+    use airbot_play_rust::types::{DiscoveredInstance, MotorSoftwareVersion};
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn format_instance_omits_identity_and_includes_versions() {
+        let instance = DiscoveredInstance {
+            interface: "can0".to_owned(),
+            identified_as: Some("AIRBOT-PLAY-BASE-001".to_owned()),
+            product_sn: Some("P123".to_owned()),
+            pcba_sn: Some("C456".to_owned()),
+            mounted_eef: Some("G2".to_owned()),
+            base_board_software_version: Some("01 02 03 04".to_owned()),
+            end_board_software_version: Some("05 06 07 08".to_owned()),
+            motor_software_versions: vec![
+                MotorSoftwareVersion {
+                    joint_id: 1,
+                    software_version: Some("1.0.0".to_owned()),
+                },
+                MotorSoftwareVersion {
+                    joint_id: 7,
+                    software_version: None,
+                },
+            ],
+            metadata: BTreeMap::new(),
+        };
+
+        let output = format_instance(1, &instance);
+
+        assert!(!output.contains("Identity"));
+        assert!(!output.contains("AIRBOT-PLAY-BASE-001"));
+        assert!(output.contains("Base Board SW Ver"));
+        assert!(output.contains("End Board SW Ver"));
+        assert!(output.contains("Motor SW Versions"));
+        assert!(output.contains("J1=1.0.0"));
+        assert!(output.contains("J7=unknown"));
+    }
+
+    #[test]
+    fn format_motor_software_versions_handles_empty_list() {
+        assert_eq!(format_motor_software_versions(&[]), "unknown");
+    }
 }

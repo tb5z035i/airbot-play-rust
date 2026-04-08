@@ -283,6 +283,12 @@ pub enum DecodedFrame {
     },
 }
 
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct MotorSoftwareVersion {
+    pub joint_id: u16,
+    pub software_version: Option<String>,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct DiscoveredInstance {
     pub interface: String,
@@ -290,5 +296,8 @@ pub struct DiscoveredInstance {
     pub product_sn: Option<String>,
     pub pcba_sn: Option<String>,
     pub mounted_eef: Option<String>,
+    pub base_board_software_version: Option<String>,
+    pub end_board_software_version: Option<String>,
+    pub motor_software_versions: Vec<MotorSoftwareVersion>,
     pub metadata: BTreeMap<String, String>,
 }

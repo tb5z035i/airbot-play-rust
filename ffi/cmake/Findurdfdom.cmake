@@ -2,22 +2,28 @@ include(FindPackageHandleStandardArgs)
 
 find_package(urdfdom_headers REQUIRED)
 
+if(DEFINED PINOCCHIO_DEP_LIBDIR)
+  set(_urdfdom_lib_hint "${PINOCCHIO_DEP_LIBDIR}")
+else()
+  set(_urdfdom_lib_hint "${PINOCCHIO_DEP_PREFIX}/lib")
+endif()
+
 find_library(
   urdfdom_sensor_LIBRARY
   NAMES urdfdom_sensor
-  HINTS "${PINOCCHIO_DEP_PREFIX}/lib")
+  HINTS "${_urdfdom_lib_hint}")
 find_library(
   urdfdom_model_state_LIBRARY
   NAMES urdfdom_model_state
-  HINTS "${PINOCCHIO_DEP_PREFIX}/lib")
+  HINTS "${_urdfdom_lib_hint}")
 find_library(
   urdfdom_model_LIBRARY
   NAMES urdfdom_model
-  HINTS "${PINOCCHIO_DEP_PREFIX}/lib")
+  HINTS "${_urdfdom_lib_hint}")
 find_library(
   urdfdom_world_LIBRARY
   NAMES urdfdom_world
-  HINTS "${PINOCCHIO_DEP_PREFIX}/lib")
+  HINTS "${_urdfdom_lib_hint}")
 
 set(
   urdfdom_LIBRARIES
@@ -27,7 +33,7 @@ set(
   ${urdfdom_world_LIBRARY})
 set(
   urdfdom_INCLUDE_DIRS
-  "${PINOCCHIO_DEP_PREFIX}/include/urdfdom_headers;${PINOCCHIO_DEP_PREFIX}/include/urdfdom")
+  "${urdfdom_headers_INCLUDE_DIRS}")
 set(urdfdom_VERSION "${urdfdom_headers_VERSION}")
 
 find_package_handle_standard_args(

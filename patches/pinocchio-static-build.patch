@@ -1,0 +1,60 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 0aeee84d..1ea0f0ba 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -141,6 +141,7 @@ endif(APPLE)
+ 
+ option(INITIALIZE_WITH_NAN "Initialize Eigen entries with NaN" OFF)
+ option(CHECK_RUNTIME_MALLOC "Check if some memory allocations are performed at runtime" OFF)
++option(BUILD_SHARED_LIBS "Build Pinocchio libraries as shared objects" ON)
+ 
+ option(ENABLE_TEMPLATE_INSTANTIATION "Template instantiation of the main library" ON)
+ 
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index 1ad5d199..aaaed347 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -68,9 +68,12 @@ function(PINOCCHIO_TARGET target_name)
+ 
+   set(LIB_NAME "${target_name}")
+ 
+-  # Manage different scope type if building an interface or shared library
+-  set(LIBRARY_TYPE SHARED)
++  # Manage different scope type if building an interface or compiled library
++  set(LIBRARY_TYPE STATIC)
+   set(LIBRARY_PUBLIC_SCOPE PUBLIC)
++  if(BUILD_SHARED_LIBS)
++    set(LIBRARY_TYPE SHARED)
++  endif()
+   if(ARGS_INTERFACE)
+     set(LIBRARY_TYPE INTERFACE)
+     set(LIBRARY_PUBLIC_SCOPE INTERFACE)
+@@ -87,6 +90,15 @@ function(PINOCCHIO_TARGET target_name)
+   add_library(${PROJECT_NAME}::${LIB_NAME} ALIAS ${LIB_NAME})
+   target_link_libraries(${LIB_NAME} ${LIBRARY_PUBLIC_SCOPE} ${PROJECT_NAME}_headers)
+ 
++  if(NOT BUILD_SHARED_LIBS)
++    set(STATIC_DEFINE_NAME "${LIB_NAME}")
++    if(LIB_NAME STREQUAL "${PROJECT_NAME}_default")
++      set(STATIC_DEFINE_NAME "${PROJECT_NAME}")
++    endif()
++    string(TOUPPER "${STATIC_DEFINE_NAME}" STATIC_DEFINE_NAME)
++    target_compile_definitions(${LIB_NAME} ${LIBRARY_PUBLIC_SCOPE} ${STATIC_DEFINE_NAME}_STATIC)
++  endif()
++
+   # On CMake 3.16 we can't call target_sources or set_target_properties with LINKER_LANGUAGE,
+   # INSTALL_RPATH and VERSION on an INTERFACE target.
+   if(NOT ARGS_INTERFACE OR CMAKE_VERSION GREATER 3.16)
+diff --git a/cmake/config.hh.cmake b/cmake/config.hh.cmake
+index d3b4a36..13f8494 100644
+--- a/cmake/config.hh.cmake
++++ b/cmake/config.hh.cmake
+@@ -76,6 +76,8 @@
+ #  define @LIBRARY_NAME@_DLLAPI
+ #  define @LIBRARY_NAME@_LOCAL
+ #  define @LIBRARY_NAME@_EXPLICIT_INSTANTIATION_DECLARATION extern template
++#  define @LIBRARY_NAME@_EXPLICIT_INSTANTIATION_DECLARATION_DLLAPI
++#  define @LIBRARY_NAME@_EXPLICIT_INSTANTIATION_DEFINITION_DLLAPI
+ # else
+ // Depending on whether one is building or using the
+ // library define DLLAPI to import or export and

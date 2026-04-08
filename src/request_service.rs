@@ -1,4 +1,5 @@
 use crate::can::socketcan_io::{SocketCanIo, SocketCanIoError};
+use crate::can::worker::{CanTxPriority, CanWorker, CanWorkerError};
 use crate::session::{RoutedFrame, SessionRouter};
 use crate::types::{DecodedFrame, RawCanFrame};
 use crate::warnings::{WarningEvent, WarningKind};
@@ -10,6 +11,8 @@ use thiserror::Error;
 pub enum RequestError {
     #[error("socket CAN error: {0}")]
     Io(#[from] SocketCanIoError),
+    #[error("CAN worker error: {0}")]
+    Worker(#[from] CanWorkerError),
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -133,6 +136,58 @@ impl RequestService {
                         "request timed out before a matching routed reply was observed",
                     )
                     .with_interface(session.interface().to_owned())
+                    .with_detail("timeout_ms", self.timeout.as_millis().to_string()),
+                );
+            }
+        }
+
+        Ok(outcome)
+    }
+
+    pub async fn exchange_via_worker<F>(
+        &self,
+        worker: &CanWorker,
+        outbound_frames: &[RawCanFrame],
+        mut inspect: F,
+    ) -> Result<RequestOutcome, RequestError>
+    where
+        F: FnMut(&RawCanFrame) -> Option<DecodedFrame>,
+    {
+        let mut frames_rx = worker.subscribe_frames();
+        worker
+            .send_frames(CanTxPriority::Lifecycle, outbound_frames.to_vec())
+            .await?;
+
+        let mut outcome = RequestOutcome::default();
+        let recv_result = tokio::time::timeout(self.timeout, async {
+            loop {
+                match frames_rx.recv().await {
+                    Ok(frame) => {
+                        let decoded = inspect(&frame);
+                        outcome.raw_frames.push(frame.clone());
+                        if let Some(decoded) = decoded {
+                            outcome.decoded_frames.push(decoded);
+                            return Ok::<(), RequestError>(());
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return Ok(()),
+                }
+            }
+        })
+        .await;
+
+        match recv_result {
+            Ok(result) => {
+                result?;
+            }
+            Err(_) => {
+                outcome.warnings.push(
+                    WarningEvent::new(
+                        WarningKind::RequestedReplyTimeout,
+                        "request timed out before a matching worker-routed reply was observed",
+                    )
+                    .with_interface(worker.interface().to_owned())
                     .with_detail("timeout_ms", self.timeout.as_millis().to_string()),
                 );
             }

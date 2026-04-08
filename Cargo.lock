@@ -11,6 +11,7 @@ dependencies = [
  "cxx",
  "cxx-build",
  "futures-util",
+ "libc",
  "pretty_assertions",
  "serde",
  "serde_json",

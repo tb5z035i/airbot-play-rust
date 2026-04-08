@@ -4,6 +4,7 @@ pub mod client;
 pub mod diag;
 pub mod eef;
 pub mod model;
+pub mod motor;
 pub mod probe;
 pub mod protocol;
 pub mod request_service;

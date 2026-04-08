@@ -1,6 +1,6 @@
 use super::{EefState, SingleEefCommand, SingleEefFeedback};
 use crate::protocol::motor::dm::DmProtocol;
-use crate::session::RoutedFrame;
+use crate::protocol::motor::MotorProtocol;
 use crate::types::{DecodedFrame, MotorCommand, MotorState, ProtocolNodeKind, RawCanFrame};
 use std::sync::{Mutex, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -24,8 +24,8 @@ pub enum G2Error {
 #[derive(Debug)]
 pub struct G2 {
     motor_id: u16,
+    protocol: Mutex<DmProtocol>,
     state: RwLock<EefState>,
-    latest_motor_state: Mutex<Option<MotorState>>,
     latest_feedback: RwLock<Option<SingleEefFeedback>>,
     feedback_tx: broadcast::Sender<SingleEefFeedback>,
 }
@@ -35,8 +35,8 @@ impl G2 {
         let (feedback_tx, _) = broadcast::channel(128);
         Self {
             motor_id,
+            protocol: Mutex::new(DmProtocol::new(motor_id)),
             state: RwLock::new(EefState::Disabled),
-            latest_motor_state: Mutex::new(None),
             latest_feedback: RwLock::new(None),
             feedback_tx,
         }
@@ -65,21 +65,20 @@ impl G2 {
         self.feedback_tx.subscribe()
     }
 
-    pub fn handle_routed_frame(&self, routed: &RoutedFrame) {
-        for decoded in &routed.decoded_frames {
-            if let DecodedFrame::MotionFeedback { node, state } = decoded {
-                if node.kind == ProtocolNodeKind::DmMotor && node.id == self.motor_id {
-                    *self
-                        .latest_motor_state
-                        .lock()
-                        .expect("G2 motor-state lock poisoned") = Some(state.clone());
-                    let feedback = self.feedback_from_motor_state(state);
-                    *self
-                        .latest_feedback
-                        .write()
-                        .expect("G2 feedback lock poisoned") = Some(feedback.clone());
-                    let _ = self.feedback_tx.send(feedback);
-                }
+    pub fn handle_raw_frame(&self, frame: &RawCanFrame) {
+        let decoded = self
+            .protocol
+            .lock()
+            .expect("G2 protocol lock poisoned")
+            .inspect(frame);
+        if let Some(DecodedFrame::MotionFeedback { node, state }) = decoded {
+            if node.kind == ProtocolNodeKind::DmMotor && node.id == self.motor_id {
+                let feedback = self.feedback_from_motor_state(&state);
+                *self
+                    .latest_feedback
+                    .write()
+                    .expect("G2 feedback lock poisoned") = Some(feedback.clone());
+                let _ = self.feedback_tx.send(feedback);
             }
         }
     }
@@ -114,7 +113,9 @@ impl G2 {
             current_threshold: command.current_threshold,
         };
 
-        DmProtocol::new(self.motor_id)
+        self.protocol
+            .lock()
+            .expect("G2 protocol lock poisoned")
             .generate_mit(&motor_command)
             .map_err(|err| G2Error::Protocol(err.to_string()))
     }
@@ -135,7 +136,9 @@ impl G2 {
             current_threshold: command.current_threshold,
         };
 
-        DmProtocol::new(self.motor_id)
+        self.protocol
+            .lock()
+            .expect("G2 protocol lock poisoned")
             .generate_pvt(&motor_command)
             .map_err(|err| G2Error::Protocol(err.to_string()))
     }

@@ -1,7 +1,7 @@
 use super::{EefState, SingleEefCommand, SingleEefFeedback};
 use crate::protocol::motor::od::OdProtocol;
-use crate::session::RoutedFrame;
 use crate::types::{DecodedFrame, MotorCommand, MotorState, ProtocolNodeKind, RawCanFrame};
+use crate::protocol::motor::MotorProtocol;
 use std::sync::{Mutex, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
@@ -20,8 +20,8 @@ pub enum E2Error {
 #[derive(Debug)]
 pub struct E2 {
     motor_id: u16,
+    protocol: Mutex<OdProtocol>,
     state: RwLock<EefState>,
-    latest_motor_state: Mutex<Option<MotorState>>,
     latest_feedback: RwLock<Option<SingleEefFeedback>>,
     feedback_tx: broadcast::Sender<SingleEefFeedback>,
 }
@@ -31,8 +31,8 @@ impl E2 {
         let (feedback_tx, _) = broadcast::channel(128);
         Self {
             motor_id,
+            protocol: Mutex::new(OdProtocol::new(motor_id)),
             state: RwLock::new(EefState::Disabled),
-            latest_motor_state: Mutex::new(None),
             latest_feedback: RwLock::new(None),
             feedback_tx,
         }
@@ -61,21 +61,20 @@ impl E2 {
         self.feedback_tx.subscribe()
     }
 
-    pub fn handle_routed_frame(&self, routed: &RoutedFrame) {
-        for decoded in &routed.decoded_frames {
-            if let DecodedFrame::MotionFeedback { node, state } = decoded {
-                if node.kind == ProtocolNodeKind::OdMotor && node.id == self.motor_id {
-                    *self
-                        .latest_motor_state
-                        .lock()
-                        .expect("E2 motor-state lock poisoned") = Some(state.clone());
-                    let feedback = self.feedback_from_motor_state(state);
-                    *self
-                        .latest_feedback
-                        .write()
-                        .expect("E2 feedback lock poisoned") = Some(feedback.clone());
-                    let _ = self.feedback_tx.send(feedback);
-                }
+    pub fn handle_raw_frame(&self, frame: &RawCanFrame) {
+        let decoded = self
+            .protocol
+            .lock()
+            .expect("E2 protocol lock poisoned")
+            .inspect(frame);
+        if let Some(DecodedFrame::MotionFeedback { node, state }) = decoded {
+            if node.kind == ProtocolNodeKind::OdMotor && node.id == self.motor_id {
+                let feedback = self.feedback_from_motor_state(&state);
+                *self
+                    .latest_feedback
+                    .write()
+                    .expect("E2 feedback lock poisoned") = Some(feedback.clone());
+                let _ = self.feedback_tx.send(feedback);
             }
         }
     }
@@ -110,7 +109,9 @@ impl E2 {
             current_threshold: command.current_threshold,
         };
 
-        OdProtocol::new(self.motor_id)
+        self.protocol
+            .lock()
+            .expect("E2 protocol lock poisoned")
             .generate_mit(&motor_command)
             .map_err(|err| E2Error::Protocol(err.to_string()))
     }

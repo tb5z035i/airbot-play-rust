@@ -1,18 +1,27 @@
 use super::command_slot::{ARM_DOF, CommandSlot, JointTarget};
+use crate::can::realtime::{configure_sched_fifo, lock_memory, set_current_thread_affinity};
+use crate::can::worker::{CanTxPriority, CanWorker, CanWorkerError};
 use crate::model::{KinematicsDynamicsBackend, ModelError, MountedEefType, Pose, gravity_coefficients_for_eef};
+use crate::motor::MotorRuntime;
+use crate::protocol::board::BoardProtocol;
+use crate::protocol::board::play_base::PlayBaseBoardProtocol;
+use crate::protocol::board::play_end::PlayEndBoardProtocol;
 use crate::protocol::motor::dm::DmProtocol;
 use crate::protocol::motor::od::OdProtocol;
-use crate::protocol::motor::MotorProtocol;
-use crate::session::{RoutedFrame, SessionRouter};
-use crate::types::{DecodedFrame, MotorCommand, MotorState, ParamValue, ProtocolNodeKind, RawCanFrame};
+use crate::request_service::{RequestError, RequestOutcome, RequestService};
+use crate::types::{DecodedFrame, MotorCommand, ParamValue, RawCanFrame};
 use crate::warning_bus::WarningBus;
 use crate::warnings::{WarningEvent, WarningKind};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
+use std::thread::JoinHandle as StdJoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
+use tracing::warn;
 
 const CONTROL_HZ: u64 = 250;
 const CONTROL_PERIOD: Duration = Duration::from_millis(1000 / CONTROL_HZ);
@@ -20,8 +29,6 @@ const FEEDBACK_TIMEOUT: Duration = Duration::from_millis(100);
 const STALE_COMMAND_THRESHOLD: Duration = Duration::from_millis(250);
 const FOLLOWING_KP: [f64; ARM_DOF] = [200.0, 200.0, 200.0, 50.0, 50.0, 50.0];
 const FOLLOWING_KD: [f64; ARM_DOF] = [3.0, 3.0, 3.0, 1.0, 1.0, 1.0];
-/// `MotorControlMode::MIT` in airbot_hardware (airbot/hardware/include/airbot_hardware/utils.hpp).
-const MIT_CONTROL_MODE_U32: u32 = 0x01;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -40,40 +47,94 @@ pub struct ArmJointFeedback {
     pub timestamp_millis: u128,
 }
 
+#[derive(Clone, Debug)]
+pub struct ArmBootstrapInfo {
+    pub mounted_eef: MountedEefType,
+    pub gravity_coefficients: [f64; ARM_DOF],
+}
+
 #[derive(Debug, Error)]
 pub enum PlayArmError {
+    #[error("control permission is required for this operation")]
+    PermissionDenied,
     #[error("arm is not in command-following mode")]
     InvalidControlState,
     #[error("missing complete arm feedback")]
     MissingFeedback,
     #[error("arm runtime already started")]
     AlreadyStarted,
+    #[error("request error: {0}")]
+    Request(#[from] RequestError),
+    #[error("CAN worker error: {0}")]
+    Worker(#[from] CanWorkerError),
     #[error("model error: {0}")]
     Model(#[from] ModelError),
+}
+
+#[derive(Debug)]
+struct BoardRuntime {
+    play_base: PlayBaseBoardProtocol,
+    play_end: PlayEndBoardProtocol,
+    params: BTreeMap<String, ParamValue>,
+}
+
+impl Default for BoardRuntime {
+    fn default() -> Self {
+        Self {
+            play_base: PlayBaseBoardProtocol::new(),
+            play_end: PlayEndBoardProtocol::new(),
+            params: BTreeMap::new(),
+        }
+    }
+}
+
+impl BoardRuntime {
+    fn handle_raw_frame(&mut self, frame: &RawCanFrame) {
+        for event in [self.play_base.inspect(frame), self.play_end.inspect(frame)]
+            .into_iter()
+            .flatten()
+        {
+            if let DecodedFrame::ParamResponse { values, .. } = event {
+                self.params.extend(values);
+            }
+        }
+    }
+}
+
+#[derive(Default)]
+struct PlayArmHandles {
+    tasks: Vec<JoinHandle<()>>,
+    control_thread: Option<StdJoinHandle<()>>,
 }
 
 pub struct PlayArm {
     interface: String,
     mounted_eef: MountedEefType,
     gravity_coefficients: RwLock<[f64; ARM_DOF]>,
-    model: Arc<dyn KinematicsDynamicsBackend>,
+    control_model: Arc<dyn KinematicsDynamicsBackend>,
+    ik_model: Arc<dyn KinematicsDynamicsBackend>,
+    worker: Arc<CanWorker>,
+    motors: Vec<Arc<MotorRuntime>>,
     warning_bus: WarningBus,
     command_slot: CommandSlot,
     state: RwLock<ArmState>,
-    motor_states: Mutex<Vec<Option<MotorState>>>,
     latest_feedback: RwLock<Option<ArmJointFeedback>>,
     latest_feedback_at: Mutex<Option<Instant>>,
     last_feedback_timeout_warning: Mutex<Option<Instant>>,
     last_stale_command_warning: Mutex<Option<Instant>>,
     feedback_tx: broadcast::Sender<ArmJointFeedback>,
-    tasks: Mutex<Vec<JoinHandle<()>>>,
+    handles: Mutex<PlayArmHandles>,
+    stop_flag: Arc<AtomicBool>,
 }
 
 impl PlayArm {
     pub fn new(
         interface: impl Into<String>,
         mounted_eef: MountedEefType,
-        model: Arc<dyn KinematicsDynamicsBackend>,
+        control_model: Arc<dyn KinematicsDynamicsBackend>,
+        ik_model: Arc<dyn KinematicsDynamicsBackend>,
+        worker: Arc<CanWorker>,
+        motors: Vec<Arc<MotorRuntime>>,
         warning_bus: WarningBus,
     ) -> Self {
         let (feedback_tx, _) = broadcast::channel(256);
@@ -81,18 +142,50 @@ impl PlayArm {
             interface: interface.into(),
             gravity_coefficients: RwLock::new(gravity_coefficients_for_eef(&mounted_eef)),
             mounted_eef,
-            model,
+            control_model,
+            ik_model,
+            worker,
+            motors,
             warning_bus,
             command_slot: CommandSlot::new(),
             state: RwLock::new(ArmState::Disabled),
-            motor_states: Mutex::new(vec![None; ARM_DOF]),
             latest_feedback: RwLock::new(None),
             latest_feedback_at: Mutex::new(None),
             last_feedback_timeout_warning: Mutex::new(None),
             last_stale_command_warning: Mutex::new(None),
             feedback_tx,
-            tasks: Mutex::new(Vec::new()),
+            handles: Mutex::new(PlayArmHandles::default()),
+            stop_flag: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    pub async fn bootstrap(worker: &CanWorker) -> Result<ArmBootstrapInfo, PlayArmError> {
+        let request_service = RequestService::default();
+
+        let mut end_protocol = PlayEndBoardProtocol::new();
+        let end_frames = end_protocol
+            .generate_param_get("eef_type")
+            .map_err(|err| PlayArmError::Model(ModelError::Backend(err.to_string())))?;
+        let end_outcome = request_service
+            .exchange_via_worker(worker, &end_frames, |frame| end_protocol.inspect(frame))
+            .await?;
+        let mounted_eef = MountedEefType::from_code(extract_u32(&end_outcome).unwrap_or(0));
+
+        let mut base_protocol = PlayBaseBoardProtocol::new();
+        let gravity_frames = base_protocol
+            .generate_param_get("gravity_comp_param")
+            .map_err(|err| PlayArmError::Model(ModelError::Backend(err.to_string())))?;
+        let gravity_outcome = request_service
+            .exchange_via_worker(worker, &gravity_frames, |frame| base_protocol.inspect(frame))
+            .await?;
+        let gravity_coefficients = extract_gravity_coefficients(&gravity_outcome)
+            .and_then(|values| values.get(mounted_eef.as_label()).copied())
+            .unwrap_or_else(|| gravity_coefficients_for_eef(&mounted_eef));
+
+        Ok(ArmBootstrapInfo {
+            mounted_eef,
+            gravity_coefficients,
+        })
     }
 
     pub fn interface(&self) -> &str {
@@ -160,249 +253,104 @@ impl PlayArm {
 
         let seed = self.latest_feedback().map(|feedback| feedback.positions.to_vec());
         let seed = seed.as_deref();
-        let joints = self.model.inverse_kinematics(pose, seed)?;
+        let joints = self.ik_model.inverse_kinematics(pose, seed)?;
         let target = JointTarget::from_slice(&joints)
             .map_err(|err| PlayArmError::Model(ModelError::Backend(err.to_string())))?;
         self.command_slot.set(target.clone());
         Ok(target)
     }
 
-    pub fn handle_routed_frame(&self, routed: &RoutedFrame) {
-        let mut changed = false;
-        {
-            let mut states = self.motor_states.lock().expect("motor states lock poisoned");
-            for decoded in &routed.decoded_frames {
-                if let DecodedFrame::MotionFeedback { node, state } = decoded {
-                    let joint_index = Self::joint_index(node.kind, node.id);
-                    if let Some(index) = joint_index {
-                        states[index] = Some(state.clone());
-                        changed = true;
-                    }
-                }
-            }
+    pub fn start(
+        self: &Arc<Self>,
+        mut arm_rx: mpsc::Receiver<RawCanFrame>,
+    ) -> Result<(), PlayArmError> {
+        let mut handles = self.handles.lock().expect("arm handle lock poisoned");
+        if !handles.tasks.is_empty() || handles.control_thread.is_some() {
+            return Err(PlayArmError::AlreadyStarted);
         }
 
-        if changed {
+        handles.tasks.push(tokio::spawn(async move {
+            let mut board_runtime = BoardRuntime::default();
+            loop {
+                match arm_rx.recv().await {
+                    Some(frame) => {
+                        board_runtime.handle_raw_frame(&frame);
+                    }
+                    None => break,
+                }
+            }
+        }));
+
+        for motor in self.motors.iter().take(ARM_DOF) {
+            let feedback_arm = Arc::clone(self);
+            let mut snapshot_rx = motor.subscribe_snapshot();
+            handles.tasks.push(tokio::spawn(async move {
+                while snapshot_rx.changed().await.is_ok() {
+                    feedback_arm.refresh_feedback_from_motors();
+                }
+            }));
+        }
+
+        self.refresh_feedback_from_motors();
+
+        self.stop_flag.store(false, Ordering::Relaxed);
+        let control_arm = Arc::clone(self);
+        let stop_flag = Arc::clone(&self.stop_flag);
+        handles.control_thread = Some(
+            std::thread::Builder::new()
+                .name("airbot-arm-control".to_owned())
+                .spawn(move || control_arm.control_loop(stop_flag))
+                .map_err(|err| PlayArmError::Model(ModelError::Backend(err.to_string())))?,
+        );
+
+        Ok(())
+    }
+
+    pub fn stop(&self) {
+        self.stop_flag.store(true, Ordering::Relaxed);
+        let (thread, tasks) = {
+            let mut handles = self.handles.lock().expect("arm handle lock poisoned");
+            let thread = handles.control_thread.take();
+            let tasks = handles.tasks.drain(..).collect::<Vec<_>>();
+            (thread, tasks)
+        };
+
+        if let Some(thread) = thread {
+            let _ = thread.join();
+        }
+
+        for task in tasks {
+            task.abort();
+        }
+    }
+
+    fn refresh_feedback_from_motors(&self) {
+        if let Some(feedback) = self.rebuild_feedback() {
+            let mut latest = self
+                .latest_feedback
+                .write()
+                .expect("latest feedback lock poisoned");
+            let changed = latest.as_ref() != Some(&feedback);
+            *latest = Some(feedback.clone());
             *self
                 .latest_feedback_at
                 .lock()
                 .expect("feedback timestamp lock poisoned") = Some(Instant::now());
 
-            if let Some(feedback) = self.rebuild_feedback() {
-                *self
-                    .latest_feedback
-                    .write()
-                    .expect("latest feedback lock poisoned") = Some(feedback.clone());
-
-                if self.state() != ArmState::Disabled {
-                    let _ = self.feedback_tx.send(feedback);
-                }
+            if changed && self.state() != ArmState::Disabled {
+                let _ = self.feedback_tx.send(feedback);
             }
         }
-    }
-
-    pub fn start(self: &Arc<Self>, session: Arc<SessionRouter>) -> Result<(), PlayArmError> {
-        let mut tasks = self.tasks.lock().expect("arm task lock poisoned");
-        if !tasks.is_empty() {
-            return Err(PlayArmError::AlreadyStarted);
-        }
-
-        let feedback_arm = Arc::clone(self);
-        let mut frames_rx = session.subscribe_frames();
-        tasks.push(tokio::spawn(async move {
-            loop {
-                match frames_rx.recv().await {
-                    Ok(routed) => feedback_arm.handle_routed_frame(&routed),
-                    Err(broadcast::error::RecvError::Closed) => break,
-                    Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                        feedback_arm.publish_warning(
-                            WarningEvent::new(
-                                WarningKind::UnmatchedFrame,
-                                format!("arm feedback consumer lagged by {skipped} routed frames"),
-                            )
-                            .with_interface(feedback_arm.interface.clone()),
-                        );
-                    }
-                }
-            }
-        }));
-
-        let startup_arm = Arc::clone(self);
-        let startup_io = session.io().clone();
-        tasks.push(tokio::spawn(async move {
-            startup_arm.bring_up_dm_motors(startup_io.as_ref()).await;
-        }));
-
-        let control_arm = Arc::clone(self);
-        tasks.push(tokio::spawn(async move {
-            let mut interval = tokio::time::interval(CONTROL_PERIOD);
-            let mut previous_tick = Instant::now();
-            loop {
-                interval.tick().await;
-                let tick_start = Instant::now();
-                let observed_period = tick_start.saturating_duration_since(previous_tick);
-                previous_tick = tick_start;
-
-                if observed_period > CONTROL_PERIOD.mul_f64(1.25) {
-                    let observed_rate = 1.0 / observed_period.as_secs_f64();
-                    control_arm.publish_warning(
-                        WarningEvent::new(
-                            WarningKind::ControlRateLow,
-                            format!(
-                                "control loop observed {:.2} Hz below the expected {} Hz",
-                                observed_rate, CONTROL_HZ
-                            ),
-                        )
-                        .with_interface(control_arm.interface.clone())
-                        .with_detail("observed_rate_hz", format!("{observed_rate:.2}"))
-                        .with_detail("target_rate_hz", CONTROL_HZ.to_string()),
-                    );
-                }
-
-                if let Err(err) = control_arm.tick_once(session.io().as_ref()).await {
-                    match err {
-                        PlayArmError::MissingFeedback => {
-                            control_arm.maybe_publish_feedback_timeout();
-                        }
-                        other => {
-                            control_arm.publish_warning(
-                                WarningEvent::new(
-                                    WarningKind::MalformedFrame,
-                                    format!("arm control tick failed: {other}"),
-                                )
-                                .with_interface(control_arm.interface.clone()),
-                            );
-                        }
-                    }
-                }
-
-                let elapsed = tick_start.elapsed();
-                if elapsed > CONTROL_PERIOD {
-                    control_arm.publish_warning(
-                        WarningEvent::new(
-                            WarningKind::ControlTickOverrun,
-                            format!(
-                                "control tick took {:.3} ms, above the {:.3} ms budget",
-                                elapsed.as_secs_f64() * 1000.0,
-                                CONTROL_PERIOD.as_secs_f64() * 1000.0,
-                            ),
-                        )
-                        .with_interface(control_arm.interface.clone())
-                        .with_detail("elapsed_ms", format!("{:.3}", elapsed.as_secs_f64() * 1000.0))
-                        .with_detail(
-                            "budget_ms",
-                            format!("{:.3}", CONTROL_PERIOD.as_secs_f64() * 1000.0),
-                        ),
-                    );
-                }
-            }
-        }));
-
-        Ok(())
-    }
-
-    /// Match [`airbot::hardware::Arm::enable`] + `arm.set_param("arm.control_mode", MIT)` for DM joints
-    /// (motors 4–6): enable drives, then set `control_mode` to MIT. OD joints are left to the firmware /
-    /// MIT stream, same as the reference stack.
-    async fn bring_up_dm_motors(&self, io: &crate::can::socketcan_io::SocketCanIo) {
-        for motor_id in 4_u16..=6_u16 {
-            let proto = DmProtocol::new(motor_id);
-            let frames = match proto.generate_enable() {
-                Ok(f) => f,
-                Err(err) => {
-                    self.publish_warning(
-                        WarningEvent::new(
-                            WarningKind::MalformedFrame,
-                            format!("DM motor {motor_id} enable encode failed: {err}"),
-                        )
-                        .with_interface(self.interface.clone()),
-                    );
-                    return;
-                }
-            };
-            for frame in frames {
-                if let Err(err) = io.send(&frame).await {
-                    self.publish_warning(
-                        WarningEvent::new(
-                            WarningKind::MalformedFrame,
-                            format!("DM motor {motor_id} enable send failed: {err}"),
-                        )
-                        .with_interface(self.interface.clone()),
-                    );
-                    return;
-                }
-            }
-        }
-
-        for motor_id in 4_u16..=6_u16 {
-            let proto = DmProtocol::new(motor_id);
-            let frames = match proto.generate_param_set(
-                "control_mode",
-                &ParamValue::U32(MIT_CONTROL_MODE_U32),
-            ) {
-                Ok(f) => f,
-                Err(err) => {
-                    self.publish_warning(
-                        WarningEvent::new(
-                            WarningKind::MalformedFrame,
-                            format!("DM motor {motor_id} control_mode MIT encode failed: {err}"),
-                        )
-                        .with_interface(self.interface.clone()),
-                    );
-                    return;
-                }
-            };
-            for frame in frames {
-                if let Err(err) = io.send(&frame).await {
-                    self.publish_warning(
-                        WarningEvent::new(
-                            WarningKind::MalformedFrame,
-                            format!("DM motor {motor_id} control_mode MIT send failed: {err}"),
-                        )
-                        .with_interface(self.interface.clone()),
-                    );
-                    return;
-                }
-            }
-        }
-    }
-
-    pub fn stop(&self) {
-        let mut tasks = self.tasks.lock().expect("arm task lock poisoned");
-        for task in tasks.drain(..) {
-            task.abort();
-        }
-    }
-
-    async fn tick_once(&self, io: &crate::can::socketcan_io::SocketCanIo) -> Result<(), PlayArmError> {
-        let frames = match self.state() {
-            ArmState::Disabled => Vec::new(),
-            ArmState::FreeDrive => self.free_drive_frames()?,
-            ArmState::CommandFollowing => self.command_following_frames()?,
-        };
-
-        for frame in frames {
-            io.send(&frame).await.map_err(|err| {
-                PlayArmError::Model(ModelError::Backend(format!("failed to send control frame: {err}")))
-            })?;
-        }
-
-        Ok(())
     }
 
     fn rebuild_feedback(&self) -> Option<ArmJointFeedback> {
-        let states = self.motor_states.lock().expect("motor states lock poisoned");
-        if states.iter().any(Option::is_none) {
-            return None;
-        }
-
         let mut positions = [0.0; ARM_DOF];
         let mut velocities = [0.0; ARM_DOF];
         let mut torques = [0.0; ARM_DOF];
         let mut valid = true;
 
-        for (index, state) in states.iter().enumerate() {
-            let state = state.as_ref().expect("guarded by any(None) check");
+        for (index, motor) in self.motors.iter().take(ARM_DOF).enumerate() {
+            let state = motor.ready_state()?;
             positions[index] = state.pos;
             velocities[index] = state.vel;
             torques[index] = state.eff;
@@ -421,12 +369,95 @@ impl PlayArm {
         })
     }
 
+    fn control_loop(self: Arc<Self>, stop_flag: Arc<AtomicBool>) {
+        if let Err(err) = configure_sched_fifo(70) {
+            warn!(error = %err, "failed to configure arm control thread priority");
+        }
+        if let Err(err) = lock_memory() {
+            warn!(error = %err, "failed to lock memory for arm control thread");
+        }
+        let _ = set_current_thread_affinity(0);
+
+        let mut previous_tick = Instant::now();
+        while !stop_flag.load(Ordering::Relaxed) {
+            let tick_start = Instant::now();
+            let observed_period = tick_start.saturating_duration_since(previous_tick);
+            previous_tick = tick_start;
+
+            if observed_period > CONTROL_PERIOD.mul_f64(1.25) {
+                let observed_rate = 1.0 / observed_period.as_secs_f64();
+                self.publish_warning(
+                    WarningEvent::new(
+                        WarningKind::ControlRateLow,
+                        format!(
+                            "control loop observed {:.2} Hz below the expected {} Hz",
+                            observed_rate, CONTROL_HZ
+                        ),
+                    )
+                    .with_interface(self.interface.clone())
+                    .with_detail("observed_rate_hz", format!("{observed_rate:.2}"))
+                    .with_detail("target_rate_hz", CONTROL_HZ.to_string()),
+                );
+            }
+
+            if let Err(err) = self.tick_once() {
+                match err {
+                    PlayArmError::MissingFeedback => self.maybe_publish_feedback_timeout(),
+                    other => self.publish_warning(
+                        WarningEvent::new(
+                            WarningKind::MalformedFrame,
+                            format!("arm control tick failed: {other}"),
+                        )
+                        .with_interface(self.interface.clone()),
+                    ),
+                }
+            }
+
+            let elapsed = tick_start.elapsed();
+            if elapsed > CONTROL_PERIOD {
+                self.publish_warning(
+                    WarningEvent::new(
+                        WarningKind::ControlTickOverrun,
+                        format!(
+                            "control tick took {:.3} ms, above the {:.3} ms budget",
+                            elapsed.as_secs_f64() * 1000.0,
+                            CONTROL_PERIOD.as_secs_f64() * 1000.0,
+                        ),
+                    )
+                    .with_interface(self.interface.clone())
+                    .with_detail("elapsed_ms", format!("{:.3}", elapsed.as_secs_f64() * 1000.0))
+                    .with_detail(
+                        "budget_ms",
+                        format!("{:.3}", CONTROL_PERIOD.as_secs_f64() * 1000.0),
+                    ),
+                );
+            }
+
+            let sleep_for = CONTROL_PERIOD.saturating_sub(tick_start.elapsed());
+            if !sleep_for.is_zero() {
+                std::thread::sleep(sleep_for);
+            }
+        }
+    }
+
+    fn tick_once(&self) -> Result<(), PlayArmError> {
+        let frames = match self.state() {
+            ArmState::Disabled => Vec::new(),
+            ArmState::FreeDrive => self.free_drive_frames()?,
+            ArmState::CommandFollowing => self.command_following_frames()?,
+        };
+
+        if !frames.is_empty() {
+            self.worker
+                .blocking_send_frames(CanTxPriority::Control, frames)?;
+        }
+
+        Ok(())
+    }
+
     fn free_drive_frames(&self) -> Result<Vec<RawCanFrame>, PlayArmError> {
-        let positions = self
-            .latest_feedback()
-            .map(|fb| fb.positions)
-            .unwrap_or([0.0; ARM_DOF]);
-        let gravity = self.gravity_compensation(&positions)?;
+        let feedback = self.latest_feedback().ok_or(PlayArmError::MissingFeedback)?;
+        let gravity = self.gravity_compensation(&feedback.positions)?;
 
         self.encode_mit_commands((0..ARM_DOF).map(|index| MotorCommand {
             pos: 0.0,
@@ -439,11 +470,8 @@ impl PlayArm {
     }
 
     fn command_following_frames(&self) -> Result<Vec<RawCanFrame>, PlayArmError> {
-        let positions = self
-            .latest_feedback()
-            .map(|fb| fb.positions)
-            .unwrap_or([0.0; ARM_DOF]);
-        let gravity = self.gravity_compensation(&positions)?;
+        let feedback = self.latest_feedback().ok_or(PlayArmError::MissingFeedback)?;
+        let gravity = self.gravity_compensation(&feedback.positions)?;
         let target = self.command_slot.latest().ok_or(PlayArmError::MissingFeedback)?;
 
         if target.age > STALE_COMMAND_THRESHOLD {
@@ -463,7 +491,9 @@ impl PlayArm {
     fn gravity_compensation(&self, joints: &[f64; ARM_DOF]) -> Result<[f64; ARM_DOF], PlayArmError> {
         let velocities = [0.0; ARM_DOF];
         let accelerations = [0.0; ARM_DOF];
-        let torques = self.model.inverse_dynamics(joints, &velocities, &accelerations)?;
+        let torques = self
+            .control_model
+            .inverse_dynamics(joints, &velocities, &accelerations)?;
         let coeffs = self.gravity_coefficients();
 
         let mut compensated = [0.0; ARM_DOF];
@@ -563,33 +593,67 @@ impl PlayArm {
     fn publish_warning(&self, warning: WarningEvent) {
         self.warning_bus.publish(warning);
     }
-
-    fn joint_index(kind: ProtocolNodeKind, id: u16) -> Option<usize> {
-        match (kind, id) {
-            (ProtocolNodeKind::OdMotor, 1..=3) => Some((id - 1) as usize),
-            (ProtocolNodeKind::DmMotor, 4..=6) => Some((id - 1) as usize),
-            _ => None,
-        }
-    }
 }
 
 impl Drop for PlayArm {
     fn drop(&mut self) {
-        let mut tasks = self.tasks.lock().expect("arm task lock poisoned");
-        for task in tasks.drain(..) {
+        self.stop_flag.store(true, Ordering::Relaxed);
+        let handles = self.handles.get_mut().expect("arm handle lock poisoned");
+        if let Some(thread) = handles.control_thread.take() {
+            let _ = thread.join();
+        }
+        for task in handles.tasks.drain(..) {
             task.abort();
         }
     }
 }
 
+fn extract_u32(outcome: &RequestOutcome) -> Option<u32> {
+    outcome.decoded_frames.iter().find_map(|decoded| match decoded {
+        DecodedFrame::ParamResponse { values, .. } => values.values().find_map(|value| match value {
+            ParamValue::U32(value) => Some(*value),
+            _ => None,
+        }),
+        _ => None,
+    })
+}
+
+fn extract_gravity_coefficients(outcome: &RequestOutcome) -> Option<BTreeMap<String, [f64; 6]>> {
+    let values = outcome.decoded_frames.iter().find_map(|decoded| match decoded {
+        DecodedFrame::ParamResponse { values, .. } => values.values().find_map(|value| match value {
+            ParamValue::FloatVec(values) if values.len() >= 24 => Some(values.clone()),
+            _ => None,
+        }),
+        _ => None,
+    })?;
+
+    let mut by_eef = BTreeMap::new();
+    for (label, chunk) in [
+        ("none", &values[0..6]),
+        ("E2B", &values[6..12]),
+        ("G2", &values[12..18]),
+        ("other", &values[18..24]),
+    ] {
+        let mut coeffs = [0.0; 6];
+        for (index, value) in chunk.iter().enumerate() {
+            coeffs[index] = f64::from(*value);
+        }
+        by_eef.insert(label.to_owned(), coeffs);
+    }
+    Some(by_eef)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{ArmState, PlayArm};
+    use super::{ArmBootstrapInfo, ArmState, PlayArm, extract_gravity_coefficients};
     use crate::arm::command_slot::JointTarget;
+    use crate::can::worker::CanWorker;
     use crate::model::{KinematicsDynamicsBackend, ModelError, MountedEefType, Pose};
-    use crate::session::RoutedFrame;
-    use crate::types::{DecodedFrame, MotorState, ProtocolNode, ProtocolNodeKind, RawCanFrame};
+    use crate::motor::MotorRuntime;
+    use crate::request_service::RequestOutcome;
+    use crate::types::{DecodedFrame, FrameKind, ParamValue, ProtocolNode, ProtocolNodeKind};
     use crate::warning_bus::WarningBus;
+    use std::collections::BTreeMap;
     use std::sync::{Arc, Mutex};
 
     #[derive(Default)]
@@ -641,38 +705,40 @@ mod tests {
         }
     }
 
-    fn arm() -> PlayArm {
-        PlayArm::new(
+    fn arm() -> Option<Arc<PlayArm>> {
+        let worker = CanWorker::dummy_for_tests();
+        let motors = (1_u16..=3)
+            .map(|id| MotorRuntime::new_od("can0", id, Arc::clone(&worker), WarningBus::default()))
+            .chain((4_u16..=6).map(|id| {
+                MotorRuntime::new_dm("can0", id, Arc::clone(&worker), WarningBus::default())
+            }))
+            .collect();
+
+        Some(Arc::new(PlayArm::new(
             "can0",
             MountedEefType::E2B,
             Arc::new(DummyBackend::with_ik_result([1.0, 2.0, 3.0, 4.0, 5.0, 6.0])),
+            Arc::new(DummyBackend::with_ik_result([1.0, 2.0, 3.0, 4.0, 5.0, 6.0])),
+            worker,
+            motors,
             WarningBus::default(),
-        )
+        )))
     }
 
-    fn feedback_frame(joint_id: u16, kind: ProtocolNodeKind, pos: f64) -> DecodedFrame {
-        DecodedFrame::MotionFeedback {
-            node: ProtocolNode { kind, id: joint_id },
-            state: MotorState {
-                joint_id,
-                pos,
-                vel: 0.1 * joint_id as f64,
-                eff: 0.2 * joint_id as f64,
-                ..MotorState::default()
-            },
-        }
-    }
-
-    #[test]
-    fn realtime_commands_are_rejected_when_not_following() {
-        let arm = arm();
+    #[tokio::test]
+    async fn realtime_commands_are_rejected_when_not_following() {
+        let Some(arm) = arm() else {
+            return;
+        };
         let result = arm.submit_joint_target([0.0; 6]);
         assert!(result.is_err());
     }
 
-    #[test]
-    fn task_targets_are_normalized_into_joint_targets() {
-        let arm = arm();
+    #[tokio::test]
+    async fn task_targets_are_normalized_into_joint_targets() {
+        let Some(arm) = arm() else {
+            return;
+        };
         arm.set_state(ArmState::CommandFollowing);
 
         let pose = Pose::from_slice(&[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]).unwrap();
@@ -682,29 +748,54 @@ mod tests {
         assert_eq!(arm.latest_joint_target().unwrap().positions[5], 6.0);
     }
 
-    #[test]
-    fn feedback_is_gated_by_arm_state() {
-        let arm = arm();
-        let mut rx = arm.subscribe_feedback();
-        let routed = RoutedFrame {
-            interface: "can0".to_owned(),
-            raw_frame: RawCanFrame::new(0x001, &[0x00]).unwrap(),
-            decoded_frames: vec![
-                feedback_frame(1, ProtocolNodeKind::OdMotor, 1.0),
-                feedback_frame(2, ProtocolNodeKind::OdMotor, 2.0),
-                feedback_frame(3, ProtocolNodeKind::OdMotor, 3.0),
-                feedback_frame(4, ProtocolNodeKind::DmMotor, 4.0),
-                feedback_frame(5, ProtocolNodeKind::DmMotor, 5.0),
-                feedback_frame(6, ProtocolNodeKind::DmMotor, 6.0),
-            ],
+    #[tokio::test]
+    async fn arm_runtime_can_start_stop_and_restart() {
+        let Some(arm) = arm() else {
+            return;
         };
 
-        arm.handle_routed_frame(&routed);
-        assert!(rx.try_recv().is_err());
+        let (_tx1, rx1) = tokio::sync::mpsc::channel(8);
+        arm.start(rx1).expect("first start should succeed");
+        arm.stop();
 
-        arm.set_state(ArmState::FreeDrive);
-        arm.handle_routed_frame(&routed);
-        let feedback = rx.try_recv().expect("feedback should be published once active");
-        assert_eq!(feedback.positions, [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+        let (_tx2, rx2) = tokio::sync::mpsc::channel(8);
+        arm.start(rx2).expect("second start should succeed");
+        arm.stop();
+    }
+
+    #[test]
+    fn gravity_coefficients_are_chunked_by_eef() {
+        let mut values = BTreeMap::new();
+        values.insert(
+            "gravity_comp_param".to_owned(),
+            ParamValue::FloatVec((0..24).map(|value| value as f32).collect()),
+        );
+        let outcome = RequestOutcome {
+            raw_frames: Vec::new(),
+            decoded_frames: vec![DecodedFrame::ParamResponse {
+                node: ProtocolNode {
+                    kind: ProtocolNodeKind::PlayBaseBoard,
+                    id: 0,
+                },
+                kind: FrameKind::GetParamResp,
+                values,
+            }],
+            warnings: Vec::new(),
+        };
+
+        let by_eef = extract_gravity_coefficients(&outcome).expect("expected coefficients");
+        assert_eq!(by_eef["none"], [0.0, 1.0, 2.0, 3.0, 4.0, 5.0]);
+        assert_eq!(by_eef["E2B"], [6.0, 7.0, 8.0, 9.0, 10.0, 11.0]);
+        assert_eq!(by_eef["G2"], [12.0, 13.0, 14.0, 15.0, 16.0, 17.0]);
+        assert_eq!(by_eef["other"], [18.0, 19.0, 20.0, 21.0, 22.0, 23.0]);
+    }
+
+    #[test]
+    fn bootstrap_info_is_constructible() {
+        let info = ArmBootstrapInfo {
+            mounted_eef: MountedEefType::E2B,
+            gravity_coefficients: [0.6, 0.6, 0.6, 1.0, 1.0, 1.0],
+        };
+        assert_eq!(info.gravity_coefficients[0], 0.6);
     }
 }

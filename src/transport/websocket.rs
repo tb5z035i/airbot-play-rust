@@ -1,4 +1,5 @@
 use crate::arm::{ArmJointFeedback, ArmState, JointTarget};
+use crate::can::worker::CanWorkerBackend;
 use crate::client::{AccessMode, AirbotPlayClient, ClientError, ConnectedRobotInfo, RequestTarget};
 use crate::eef::{EefState, SingleEefCommand, SingleEefFeedback};
 use crate::model::{MountedEefType, Pose};
@@ -12,6 +13,7 @@ use std::sync::Arc;
 use thiserror::Error;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::broadcast;
+use tokio::task::JoinSet;
 use tokio_tungstenite::accept_async;
 use tokio_tungstenite::tungstenite::{Error as WsError, Message};
 use tracing::{info, warn};
@@ -21,6 +23,7 @@ pub struct WebSocketServerConfig {
     pub bind_addr: String,
     pub interface: String,
     pub allow_control: bool,
+    pub can_backend: CanWorkerBackend,
 }
 
 impl Default for WebSocketServerConfig {
@@ -29,6 +32,7 @@ impl Default for WebSocketServerConfig {
             bind_addr: "127.0.0.1:9002".to_owned(),
             interface: "can0".to_owned(),
             allow_control: true,
+            can_backend: CanWorkerBackend::AsyncFd,
         }
     }
 }
@@ -111,9 +115,9 @@ enum ServerMessage {
 
 pub async fn run_websocket_server(config: WebSocketServerConfig) -> Result<(), WebSocketServerError> {
     let client = Arc::new(if config.allow_control {
-        AirbotPlayClient::connect_control(config.interface.clone()).await?
+        AirbotPlayClient::connect_control_with_backend(config.interface.clone(), config.can_backend).await?
     } else {
-        AirbotPlayClient::connect_readonly(config.interface.clone()).await?
+        AirbotPlayClient::connect_readonly_with_backend(config.interface.clone(), config.can_backend).await?
     });
 
     let listener = TcpListener::bind(&config.bind_addr).await?;
@@ -121,19 +125,38 @@ pub async fn run_websocket_server(config: WebSocketServerConfig) -> Result<(), W
         bind_addr = %config.bind_addr,
         interface = %config.interface,
         allow_control = config.allow_control,
+        can_backend = ?config.can_backend,
         "AIRBOT Play websocket server listening"
     );
 
+    let mut connections = JoinSet::new();
+    let shutdown = shutdown_signal();
+    tokio::pin!(shutdown);
+
     loop {
-        let (stream, addr) = listener.accept().await?;
-        let client = Arc::clone(&client);
-        let allow_control = config.allow_control;
-        tokio::spawn(async move {
-            if let Err(err) = handle_connection(stream, client, allow_control).await {
-                warn!(peer = %addr, error = %err, "websocket connection closed with error");
+        tokio::select! {
+            accept_result = listener.accept() => {
+                let (stream, addr) = accept_result?;
+                let client = Arc::clone(&client);
+                let allow_control = config.allow_control;
+                connections.spawn(async move {
+                    if let Err(err) = handle_connection(stream, client, allow_control).await {
+                        warn!(peer = %addr, error = %err, "websocket connection closed with error");
+                    }
+                });
             }
-        });
+            shutdown_result = &mut shutdown => {
+                shutdown_result?;
+                info!("shutdown signal received, stopping websocket server");
+                break;
+            }
+        }
     }
+
+    connections.abort_all();
+    while connections.join_next().await.is_some() {}
+    client.shutdown_gracefully().await?;
+    Ok(())
 }
 
 async fn handle_connection(
@@ -412,6 +435,23 @@ async fn handle_connection(
     }
 
     Ok(())
+}
+
+async fn shutdown_signal() -> Result<(), std::io::Error> {
+    #[cfg(unix)]
+    {
+        let mut terminate =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+        tokio::select! {
+            result = tokio::signal::ctrl_c() => result,
+            _ = terminate.recv() => Ok(()),
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        tokio::signal::ctrl_c().await
+    }
 }
 
 async fn send_json<S>(sink: &mut S, message: &ServerMessage) -> Result<(), WebSocketServerError>

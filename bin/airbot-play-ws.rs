@@ -1,3 +1,4 @@
+use airbot_play_rust::can::worker::CanWorkerBackend;
 use airbot_play_rust::transport::websocket::{WebSocketServerConfig, run_websocket_server};
 use clap::Parser;
 
@@ -11,6 +12,8 @@ struct Args {
     interface: String,
     #[arg(long, default_value_t = true)]
     allow_control: bool,
+    #[arg(long, value_enum, default_value_t = CanWorkerBackend::AsyncFd)]
+    can_backend: CanWorkerBackend,
 }
 
 #[tokio::main]
@@ -22,6 +25,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         bind_addr: args.bind,
         interface: args.interface,
         allow_control: args.allow_control,
+        can_backend: args.can_backend,
     })
     .await?;
 

@@ -123,6 +123,11 @@ impl SocketCanIo {
     }
 }
 
-fn frame_to_raw(frame: CanFrame) -> Result<RawCanFrame, SocketCanIoError> {
+pub fn raw_to_can_data_frame(frame: &RawCanFrame) -> Result<CanDataFrame, SocketCanIoError> {
+    <CanDataFrame as socketcan::Frame>::from_raw_id(frame.can_id, frame.payload())
+        .ok_or_else(|| SocketCanIoError::InvalidFrame(format!("failed to build frame {frame}")))
+}
+
+pub fn frame_to_raw(frame: CanFrame) -> Result<RawCanFrame, SocketCanIoError> {
     RawCanFrame::new(frame.raw_id(), frame.data()).map_err(SocketCanIoError::InvalidFrame)
 }

@@ -1,8 +1,9 @@
 use crate::arm::{ArmJointFeedback, ArmState, JointTarget, PlayArm, PlayArmError};
+use crate::can::router::CanFrameRouter;
+use crate::can::worker::{CanTxPriority, CanWorker, CanWorkerBackend, CanWorkerConfig, CanWorkerError};
 use crate::eef::{E2, EefState, G2, SingleEefCommand, SingleEefFeedback};
-use crate::model::{
-    ModelBackendKind, ModelError, ModelRegistry, MountedEefType, Pose, gravity_coefficients_for_eef,
-};
+use crate::model::{ModelBackendKind, ModelError, ModelRegistry, MountedEefType, Pose};
+use crate::motor::{MotorRuntime, MotorRuntimeError};
 use crate::protocol::board::BoardProtocol;
 use crate::protocol::board::play_base::PlayBaseBoardProtocol;
 use crate::protocol::board::play_end::PlayEndBoardProtocol;
@@ -10,7 +11,6 @@ use crate::protocol::motor::MotorProtocol;
 use crate::protocol::motor::dm::DmProtocol;
 use crate::protocol::motor::od::OdProtocol;
 use crate::request_service::{RequestError, RequestOutcome, RequestService};
-use crate::session::{SessionRouter, SessionRouterError};
 use crate::types::RawCanFrame;
 use crate::types::{DecodedFrame, ParamValue, ProtocolNodeKind};
 use crate::warning_bus::WarningBus;
@@ -49,10 +49,12 @@ pub struct ConnectedRobotInfo {
 pub enum ClientError {
     #[error("control permission is required for this operation")]
     PermissionDenied,
+    #[error("CAN worker error: {0}")]
+    Worker(#[from] CanWorkerError),
     #[error("request error: {0}")]
     Request(#[from] RequestError),
-    #[error("session router error: {0}")]
-    Session(#[from] SessionRouterError),
+    #[error("motor runtime error: {0}")]
+    Motor(#[from] MotorRuntimeError),
     #[error("arm runtime error: {0}")]
     Arm(#[from] PlayArmError),
     #[error("model error: {0}")]
@@ -64,7 +66,8 @@ pub enum ClientError {
 pub struct AirbotPlayClient {
     info: ConnectedRobotInfo,
     request_service: RequestService,
-    session: Arc<SessionRouter>,
+    worker: Arc<CanWorker>,
+    frame_router: Arc<CanFrameRouter>,
     arm: Arc<PlayArm>,
     e2: Arc<E2>,
     g2: Arc<G2>,
@@ -74,52 +77,98 @@ pub struct AirbotPlayClient {
 
 impl AirbotPlayClient {
     pub async fn connect_readonly(interface: impl Into<String>) -> Result<Self, ClientError> {
-        Self::connect(interface, AccessMode::Readonly).await
+        Self::connect_with_backend(interface, AccessMode::Readonly, CanWorkerBackend::AsyncFd).await
     }
 
     pub async fn connect_control(interface: impl Into<String>) -> Result<Self, ClientError> {
-        Self::connect(interface, AccessMode::Control).await
+        Self::connect_with_backend(interface, AccessMode::Control, CanWorkerBackend::AsyncFd).await
+    }
+
+    pub async fn connect_readonly_with_backend(
+        interface: impl Into<String>,
+        backend: CanWorkerBackend,
+    ) -> Result<Self, ClientError> {
+        Self::connect_with_backend(interface, AccessMode::Readonly, backend).await
+    }
+
+    pub async fn connect_control_with_backend(
+        interface: impl Into<String>,
+        backend: CanWorkerBackend,
+    ) -> Result<Self, ClientError> {
+        Self::connect_with_backend(interface, AccessMode::Control, backend).await
     }
 
     pub async fn connect(
         interface: impl Into<String>,
         access_mode: AccessMode,
     ) -> Result<Self, ClientError> {
+        Self::connect_with_backend(interface, access_mode, CanWorkerBackend::AsyncFd).await
+    }
+
+    pub async fn connect_with_backend(
+        interface: impl Into<String>,
+        access_mode: AccessMode,
+        backend: CanWorkerBackend,
+    ) -> Result<Self, ClientError> {
         let interface = interface.into();
         let request_service = RequestService::default();
-        let session = Arc::new(SessionRouter::open(interface.clone())?);
+        let worker = CanWorker::open(CanWorkerConfig {
+            interface: interface.clone(),
+            backend,
+            ..CanWorkerConfig::default()
+        })?;
+        let bootstrap = PlayArm::bootstrap(worker.as_ref()).await?;
 
-        let mounted_eef = bootstrap_mounted_eef(&request_service, session.io().as_ref()).await?;
-        let gravity_coefficients =
-            bootstrap_gravity_coefficients(&request_service, session.io().as_ref(), &mounted_eef)
-                .await?;
+        let control_model = ModelRegistry::load(ModelBackendKind::Pinocchio, bootstrap.mounted_eef.clone())?;
+        let ik_model = ModelRegistry::load(ModelBackendKind::Pinocchio, bootstrap.mounted_eef.clone())?;
+        let warning_bus = WarningBus::default();
+        let (frame_router, mut routes) = CanFrameRouter::new(
+            Arc::clone(&worker),
+            1_u16..=6_u16,
+            matches!(bootstrap.mounted_eef, MountedEefType::E2B | MountedEefType::G2).then_some(7),
+        );
+        let motors = (1_u16..=3)
+            .map(|id| MotorRuntime::new_od(interface.clone(), id, Arc::clone(&worker), warning_bus.clone()))
+            .chain((4_u16..=6).map(|id| {
+                MotorRuntime::new_dm(interface.clone(), id, Arc::clone(&worker), warning_bus.clone())
+            }))
+            .collect::<Vec<_>>();
+        frame_router.start().map_err(|err| ClientError::Model(ModelError::Backend(err.to_string())))?;
+        for motor in &motors {
+            let frame_rx = routes
+                .motor_rxs
+                .remove(&motor.joint_id())
+                .expect("missing motor frame receiver");
+            motor.start(frame_rx)?;
+        }
 
-        let model = ModelRegistry::load(ModelBackendKind::Pinocchio, mounted_eef.clone())?;
-        let warning_bus = session.warning_bus().clone();
         let arm = Arc::new(PlayArm::new(
             interface.clone(),
-            mounted_eef.clone(),
-            model,
+            bootstrap.mounted_eef.clone(),
+            control_model,
+            ik_model,
+            Arc::clone(&worker),
+            motors,
             warning_bus.clone(),
         ));
-        arm.set_gravity_coefficients(gravity_coefficients);
+        arm.set_gravity_coefficients(bootstrap.gravity_coefficients);
 
         let e2 = Arc::new(E2::new(7));
         let g2 = Arc::new(G2::new(7));
-        session.start()?;
-        arm.start(Arc::clone(&session))?;
+        arm.start(routes.arm_rx)?;
 
-        let eef_task = spawn_eef_dispatcher(Arc::clone(&session), Arc::clone(&e2), Arc::clone(&g2));
+        let eef_task = spawn_eef_dispatcher(routes.eef_rx, Arc::clone(&e2), Arc::clone(&g2));
 
         Ok(Self {
             info: ConnectedRobotInfo {
                 interface,
                 access_mode,
-                mounted_eef,
-                gravity_coefficients,
+                mounted_eef: bootstrap.mounted_eef,
+                gravity_coefficients: bootstrap.gravity_coefficients,
             },
             request_service,
-            session,
+            worker,
+            frame_router,
             arm,
             e2,
             g2,
@@ -132,8 +181,8 @@ impl AirbotPlayClient {
         &self.info
     }
 
-    pub fn session(&self) -> &Arc<SessionRouter> {
-        &self.session
+    pub fn worker(&self) -> &Arc<CanWorker> {
+        &self.worker
     }
 
     pub fn arm(&self) -> &Arc<PlayArm> {
@@ -173,20 +222,66 @@ impl AirbotPlayClient {
         }
         .map_err(|err| ClientError::Model(ModelError::Backend(err.to_string())))?;
 
-        Ok(self
-            .request_service
-            .exchange_via_session(&self.session, &frames, |routed| {
-                routed.decoded_frames.iter().find_map(|decoded| match decoded {
-                    DecodedFrame::ParamResponse { node, values, .. }
-                        if request_target_matches(target, node.kind, node.id)
-                            && values.contains_key(name) =>
-                    {
-                        Some(decoded.clone())
-                    }
-                    _ => None,
-                })
-            })
-            .await?)
+        let outcome = match target {
+            RequestTarget::PlayBaseBoard => {
+                let mut protocol = PlayBaseBoardProtocol::new();
+                self.request_service
+                    .exchange_via_worker(&self.worker, &frames, |frame| match protocol.inspect(frame) {
+                        Some(ref decoded @ DecodedFrame::ParamResponse { node, ref values, .. })
+                            if request_target_matches(target, node.kind, node.id)
+                                && values.contains_key(name) =>
+                        {
+                            Some(decoded.clone())
+                        }
+                        _ => None,
+                    })
+                    .await?
+            }
+            RequestTarget::PlayEndBoard => {
+                let mut protocol = PlayEndBoardProtocol::new();
+                self.request_service
+                    .exchange_via_worker(&self.worker, &frames, |frame| match protocol.inspect(frame) {
+                        Some(ref decoded @ DecodedFrame::ParamResponse { node, ref values, .. })
+                            if request_target_matches(target, node.kind, node.id)
+                                && values.contains_key(name) =>
+                        {
+                            Some(decoded.clone())
+                        }
+                        _ => None,
+                    })
+                    .await?
+            }
+            RequestTarget::OdMotor(id) => {
+                let mut protocol = OdProtocol::new(id);
+                self.request_service
+                    .exchange_via_worker(&self.worker, &frames, |frame| match protocol.inspect(frame) {
+                        Some(ref decoded @ DecodedFrame::ParamResponse { node, ref values, .. })
+                            if request_target_matches(target, node.kind, node.id)
+                                && values.contains_key(name) =>
+                        {
+                            Some(decoded.clone())
+                        }
+                        _ => None,
+                    })
+                    .await?
+            }
+            RequestTarget::DmMotor(id) => {
+                let mut protocol = DmProtocol::new(id);
+                self.request_service
+                    .exchange_via_worker(&self.worker, &frames, |frame| match protocol.inspect(frame) {
+                        Some(ref decoded @ DecodedFrame::ParamResponse { node, ref values, .. })
+                            if request_target_matches(target, node.kind, node.id)
+                                && values.contains_key(name) =>
+                        {
+                            Some(decoded.clone())
+                        }
+                        _ => None,
+                    })
+                    .await?
+            }
+        };
+
+        Ok(outcome)
     }
 
     pub async fn query_mounted_eef(&self) -> Result<MountedEefType, ClientError> {
@@ -273,9 +368,27 @@ impl AirbotPlayClient {
         Ok(frames)
     }
 
+    pub async fn shutdown_gracefully(&self) -> Result<(), ClientError> {
+        self.arm.stop();
+
+        let disable_frames = build_shutdown_disable_frames()?;
+        if !disable_frames.is_empty() {
+            self.worker
+                .send_frames(CanTxPriority::Lifecycle, disable_frames)
+                .await?;
+        }
+
+        self.frame_router.stop();
+        if let Some(task) = self.eef_task.lock().expect("eef task lock poisoned").take() {
+            task.abort();
+        }
+        self.worker.shutdown().await;
+        Ok(())
+    }
+
     pub fn shutdown(&self) {
         self.arm.stop();
-        self.session.stop();
+        self.frame_router.stop();
         if let Some(task) = self.eef_task.lock().expect("eef task lock poisoned").take() {
             task.abort();
         }
@@ -289,21 +402,17 @@ impl AirbotPlayClient {
     }
 
     async fn send_frames(&self, frames: &[RawCanFrame]) -> Result<(), ClientError> {
-        for frame in frames {
-            self.session
-                .io()
-                .send(frame)
-                .await
-                .map_err(|err| ClientError::Session(SessionRouterError::Io(err)))?;
-        }
-        Ok(())
+        self.worker
+            .send_frames(CanTxPriority::Control, frames.to_vec())
+            .await
+            .map_err(ClientError::from)
     }
 }
 
 impl Drop for AirbotPlayClient {
     fn drop(&mut self) {
         self.arm.stop();
-        self.session.stop();
+        self.frame_router.stop();
         if let Some(task) = self.eef_task.get_mut().expect("eef task lock poisoned").take() {
             task.abort();
         }
@@ -311,23 +420,37 @@ impl Drop for AirbotPlayClient {
 }
 
 fn spawn_eef_dispatcher(
-    session: Arc<SessionRouter>,
+    mut eef_rx: Option<tokio::sync::mpsc::Receiver<RawCanFrame>>,
     e2: Arc<E2>,
     g2: Arc<G2>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
-        let mut frames_rx = session.subscribe_frames();
+        let Some(ref mut frames_rx) = eef_rx else {
+            return;
+        };
         loop {
             match frames_rx.recv().await {
-                Ok(routed) => {
-                    e2.handle_routed_frame(&routed);
-                    g2.handle_routed_frame(&routed);
+                Some(frame) => {
+                    e2.handle_raw_frame(&frame);
+                    g2.handle_raw_frame(&frame);
                 }
-                Err(broadcast::error::RecvError::Closed) => break,
-                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                None => break,
             }
         }
     })
+}
+
+fn build_shutdown_disable_frames() -> Result<Vec<RawCanFrame>, ClientError> {
+    let mut frames = Vec::new();
+    for motor_id in 4_u16..=6_u16 {
+        frames.extend(
+            DmProtocol::new(motor_id)
+                .generate_disable()
+                .map_err(|err| ClientError::Model(ModelError::Backend(err.to_string())))?,
+        );
+    }
+
+    Ok(frames)
 }
 
 fn request_target_matches(target: RequestTarget, kind: ProtocolNodeKind, id: u16) -> bool {
@@ -338,38 +461,6 @@ fn request_target_matches(target: RequestTarget, kind: ProtocolNodeKind, id: u16
         (RequestTarget::DmMotor(expected), ProtocolNodeKind::DmMotor, actual) => expected == actual,
         _ => false,
     }
-}
-
-async fn bootstrap_mounted_eef(
-    request_service: &RequestService,
-    io: &crate::can::socketcan_io::SocketCanIo,
-) -> Result<MountedEefType, ClientError> {
-    let mut protocol = PlayEndBoardProtocol::new();
-    let frames = protocol
-        .generate_param_get("eef_type")
-        .map_err(|err| ClientError::Model(ModelError::Backend(err.to_string())))?;
-    let outcome = request_service
-        .exchange(io, &frames, |frame| protocol.inspect(frame))
-        .await?;
-    Ok(MountedEefType::from_code(extract_u32(&outcome).unwrap_or(0)))
-}
-
-async fn bootstrap_gravity_coefficients(
-    request_service: &RequestService,
-    io: &crate::can::socketcan_io::SocketCanIo,
-    mounted_eef: &MountedEefType,
-) -> Result<[f64; 6], ClientError> {
-    let mut protocol = PlayBaseBoardProtocol::new();
-    let frames = protocol
-        .generate_param_get("gravity_comp_param")
-        .map_err(|err| ClientError::Model(ModelError::Backend(err.to_string())))?;
-    let outcome = request_service
-        .exchange(io, &frames, |frame| protocol.inspect(frame))
-        .await?;
-
-    Ok(extract_gravity_coefficients(&outcome)
-        .and_then(|values| values.get(mounted_eef.as_label()).copied())
-        .unwrap_or_else(|| gravity_coefficients_for_eef(mounted_eef)))
 }
 
 fn extract_u32(outcome: &RequestOutcome) -> Option<u32> {
@@ -409,7 +500,7 @@ fn extract_gravity_coefficients(outcome: &RequestOutcome) -> Option<BTreeMap<Str
 
 #[cfg(test)]
 mod tests {
-    use super::{AccessMode, ConnectedRobotInfo, extract_gravity_coefficients};
+    use super::{AccessMode, ConnectedRobotInfo, build_shutdown_disable_frames, extract_gravity_coefficients};
     use crate::request_service::RequestOutcome;
     use crate::types::{DecodedFrame, FrameKind, ParamValue, ProtocolNode, ProtocolNodeKind};
     use std::collections::BTreeMap;
@@ -457,5 +548,16 @@ mod tests {
 
         assert_eq!(info.interface, "can0");
         assert_eq!(info.gravity_coefficients[5], 0.893);
+    }
+
+    #[test]
+    fn graceful_shutdown_disables_only_dm_arm_motors() {
+        let frames = build_shutdown_disable_frames()
+            .expect("disable frames should build");
+        let ids = frames.iter().map(|frame| frame.can_id).collect::<Vec<_>>();
+        assert_eq!(ids, vec![4, 5, 6]);
+        for frame in frames {
+            assert_eq!(frame.payload(), &[0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFD]);
+        }
     }
 }

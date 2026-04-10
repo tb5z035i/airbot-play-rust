@@ -1,33 +1,52 @@
 # airbot-play-rust
 
-Rust library and CLI tools for working with the AIRBOT Play arm over CAN, with a vendored C++ Pinocchio integration for model-based kinematics and dynamics.
+Rust library and CLI tools for working with the AIRBOT Play arm over CAN, with
+a vendored C++ Pinocchio integration for model-based kinematics and dynamics.
 
-## What is in this repo
+## Overview
 
-The crate exposes a reusable Rust library in `src/` and a few CLI tools in `bin/`:
+This crate contains:
 
-- `airbot-play-ws`: WebSocket adapter for exposing the robot over a network interface.
-- `airbot-play-probe`: Probe and report AIRBOT instances and board metadata.
-- `airbot-can-diag`: Decode and inspect CAN traffic live or from recorded logs.
+- a reusable Rust library under `src/`
+- CLI tools under `bin/`
+- Linux host setup payload under `root/` for `udev`, `systemd`, and CAN helper
+  scripts
+- a source-install helper at `scripts/install-system-setup.sh`
+- Debian packaging metadata via `cargo-deb`
+
+The main binaries are:
+
+- `airbot-play-ws`: WebSocket adapter for exposing the robot over a network
+  interface
+- `airbot-play-iceoryx2`: iceoryx2 adapter for shared-memory IPC
+- `airbot-play-probe`: probe connected AIRBOT instances and report board
+  metadata
+- `airbot-can-diag`: decode CAN traffic live or from recorded logs
 
 The library surface includes:
 
 - CAN transport and worker backends
-- probe and diagnostic helpers
 - request/session handling
+- probe and diagnostic helpers
 - AIRBOT model, arm, motor, and end-effector modules
 - warning/event plumbing
 - WebSocket transport support
+- optional iceoryx2 transport support
 
-## Native build model
+## Platform And Dependencies
 
-This repo builds Pinocchio from the vendored source tree in `third_party/pinocchio`.
+Linux is the primary supported environment.
 
-The parent repo also carries a local patch at `patches/pinocchio-static-build.patch` that adds static-library support to the vendored Pinocchio checkout. Local builds and CI should apply that patch before compiling.
+This repo builds Pinocchio from the vendored source tree in
+`third_party/pinocchio`.
 
-Pinocchio itself is linked statically into `airbot-play-ws`. The remaining non-Pinocchio native dependencies are resolved from the system install, typically under `/usr`.
+The parent repo carries a local patch at
+`patches/pinocchio-static-build.patch` that adds static-library support to the
+vendored Pinocchio checkout. Local builds and CI should apply that patch before
+compiling.
 
-Today the build expects system packages for:
+The build expects native dependencies from the system install, typically under
+`/usr`, including:
 
 - `Eigen`
 - `Boost` filesystem and serialization
@@ -35,20 +54,13 @@ Today the build expects system packages for:
 - `console_bridge`
 - `tinyxml2`
 
-## Requirements
+Default builds also enable the `iceoryx2-transport` feature. That path needs
+`clang`, `libclang-dev`, and `llvm-dev` for bindgen.
 
-Linux is the primary supported environment.
+## Build Prerequisites
 
-Build prerequisites:
-
-- Rust toolchain with Cargo
-- C++ compiler
-- `cmake`
-- `pkg-config`
-- `patch`
-- git submodules initialized
-
-On Ubuntu 24.04 / Debian-like systems, the following packages are sufficient for the current build:
+On Ubuntu 24.04 / Debian-like systems, the following packages are sufficient
+for building the crate:
 
 ```bash
 sudo apt-get update
@@ -57,9 +69,9 @@ sudo apt-get install -y \
   clang \
   cmake \
   libclang-dev \
+  llvm-dev \
   pkg-config \
   patch \
-  llvm-dev \
   libeigen3-dev \
   libboost-filesystem-dev \
   libboost-serialization-dev \
@@ -70,11 +82,22 @@ sudo apt-get install -y \
   liburdfdom-headers-dev
 ```
 
-`clang`, `libclang-dev`, and `llvm-dev` are required for the vendored
-`iceoryx2` bindgen steps. If a build fails with errors like
-`fatal error: 'stddef.h' file not found`, install those packages first.
+If you also want to install host setup files from the source checkout or use
+the packaged helper scripts, install these runtime utilities as well:
 
-## Clone and build
+```bash
+sudo apt-get install -y \
+  can-utils \
+  iproute2 \
+  kmod \
+  udev \
+  usbutils
+```
+
+If a build fails with errors like `fatal error: 'stddef.h' file not found`,
+install `clang`, `libclang-dev`, and `llvm-dev`.
+
+## Clone And Build
 
 Initialize the submodules first:
 
@@ -91,34 +114,28 @@ patch -d third_party/pinocchio -p1 < patches/pinocchio-static-build.patch
 Build all targets:
 
 ```bash
-cargo build --all-targets
+cargo build --locked --all-targets
 ```
 
-Or build only the WebSocket adapter:
+Build only the WebSocket adapter:
 
 ```bash
-cargo build --bin airbot-play-ws
+cargo build --locked --bin airbot-play-ws
 ```
 
-## Debian package
-
-This repo includes a `cargo-deb` configuration that packages the Rust CLI tools
-together with the AIRBOT CAN setup helpers under `root/`.
-
-Build the package locally from a prepared checkout:
+Build only the iceoryx2 adapter:
 
 ```bash
-cargo install cargo-deb --locked
-cargo deb --locked
+cargo build --locked --bin airbot-play-iceoryx2
 ```
 
-The resulting package is written to `target/debian/*.deb` and installs:
+If you do not need iceoryx2 support, you can disable default features:
 
-- the Rust CLI tools under `/usr/bin`
-- the udev rules under `/lib/udev/rules.d`
-- the `slcan@.service` unit under `/lib/systemd/system`
+```bash
+cargo build --locked --no-default-features --bin airbot-play-ws
+```
 
-## Source checkout host setup
+## Host Setup From A Source Checkout
 
 If you are using this repo directly as a Rust crate instead of installing the
 generated `.deb`, install the host-side CAN setup files from the checkout:
@@ -130,13 +147,54 @@ sudo ./scripts/install-system-setup.sh
 By default this installs:
 
 - helper scripts under `/usr/local/bin`
-- udev rules under `/etc/udev/rules.d`
+- `udev` rules under `/etc/udev/rules.d`
 - the `slcan@.service` unit under `/etc/systemd/system`
 
-You can override the helper-script prefix with `--prefix /some/path`, or skip
-module loading and service reloads with `--skip-modprobe` / `--skip-reload`.
+The script also reloads `udev` and `systemd`, and attempts to load the CAN
+kernel modules unless you ask it not to.
 
-## Running the tools
+Useful options:
+
+- `--prefix /some/path`: install helper scripts under `/some/path/bin`
+- `--skip-modprobe`: do not call `modprobe`
+- `--skip-reload`: do not reload `udev` rules or `systemd`
+
+After installation, the helper `bind_airbot_device` is available under the
+chosen prefix for creating persistent device-name bindings for supported USB CAN
+adapters.
+
+## Debian Package
+
+This repo includes a `cargo-deb` configuration that packages the Rust CLI tools
+together with the AIRBOT CAN setup helpers under `root/`.
+
+Install the packaging tool:
+
+```bash
+cargo install --locked cargo-deb
+```
+
+If your environment does not already provide them, install the Debian packaging
+helpers used by CI:
+
+```bash
+sudo apt-get install -y dpkg-dev liblzma-dev
+```
+
+Build the package from a prepared checkout:
+
+```bash
+cargo deb --locked
+```
+
+The resulting package is written to `target/debian/*.deb` and installs:
+
+- the Rust CLI tools under `/usr/bin`
+- helper scripts under `/usr/bin`
+- `udev` rules under `/lib/udev/rules.d`
+- the `slcan@.service` unit under `/lib/systemd/system`
+
+## Running The Tools
 
 Start the WebSocket adapter:
 
@@ -144,10 +202,25 @@ Start the WebSocket adapter:
 cargo run --bin airbot-play-ws -- --interface can0 --bind 127.0.0.1:9002
 ```
 
+Start the iceoryx2 adapter:
+
+```bash
+cargo run --bin airbot-play-iceoryx2 -- --interface can0
+```
+
+By default, the iceoryx2 service root is derived from the interface as
+`airbot-play/<interface>`.
+
 Probe connected AIRBOT devices:
 
 ```bash
 cargo run --bin airbot-play-probe -- --timeout-ms 1000
+```
+
+Probe and emit the structured JSON report:
+
+```bash
+cargo run --bin airbot-play-probe -- --json-report
 ```
 
 Decode live CAN traffic:
@@ -162,14 +235,15 @@ Decode a recorded `candump` log:
 cargo run --bin airbot-can-diag -- --input /path/to/candump.log
 ```
 
-## Dependency discovery
+## Dependency Discovery
 
 The build script resolves native dependencies in this order:
 
 1. `AIRBOT_PINOCCHIO_DEP_PREFIX`, if set
 2. a local `.pin-env` cmeel prefix, if present
 3. the plain system install under `/usr`
-4. other prefixes exposed through `AMENT_PREFIX_PATH`, `CMAKE_PREFIX_PATH`, or `/opt/ros`
+4. other prefixes exposed through `AMENT_PREFIX_PATH`, `CMAKE_PREFIX_PATH`, or
+   `/opt/ros`
 
 If you want to force a custom dependency prefix, set:
 
@@ -179,4 +253,11 @@ export AIRBOT_PINOCCHIO_DEP_PREFIX=/path/to/prefix
 
 ## CI
 
-The repository-level GitHub Actions workflow installs the system packages, applies `patches/pinocchio-static-build.patch`, builds the crate from a clean checkout, and uploads a `.deb` artifact built via `cargo-deb`. Use that workflow as the reference for a reproducible build environment.
+The GitHub Actions workflow does two things:
+
+- `build`: installs the native build dependencies, applies
+  `patches/pinocchio-static-build.patch`, and builds all targets
+- `package-deb`: builds the release binaries, creates a `.deb` with
+  `cargo-deb`, and uploads it as a CI artifact
+
+Use that workflow as the reference for a reproducible clean build environment.

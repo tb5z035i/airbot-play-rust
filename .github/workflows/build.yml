@@ -28,7 +28,10 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             build-essential \
+            clang \
             cmake \
+            libclang-dev \
+            llvm-dev \
             pkg-config \
             patch \
             libeigen3-dev \
@@ -47,3 +50,61 @@ jobs:
 
       - name: Build all targets
         run: cargo build --locked --all-targets
+
+  package-deb:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            clang \
+            cmake \
+            dpkg-dev \
+            libclang-dev \
+            liblzma-dev \
+            llvm-dev \
+            pkg-config \
+            patch \
+            libeigen3-dev \
+            libboost-filesystem-dev \
+            libboost-serialization-dev \
+            libboost-test-dev \
+            libconsole-bridge-dev \
+            libtinyxml2-dev \
+            liburdfdom-dev \
+            liburdfdom-headers-dev
+
+      - name: Install cargo-deb
+        run: cargo install --locked cargo-deb
+
+      - name: Apply vendored Pinocchio patch
+        run: |
+          patch --batch --dry-run -d third_party/pinocchio -p1 < patches/pinocchio-static-build.patch
+          patch --batch -d third_party/pinocchio -p1 < patches/pinocchio-static-build.patch
+
+      - name: Build release binaries
+        run: cargo build --locked --release --bins
+
+      - name: Build Debian package
+        run: cargo deb --locked --no-build --verbose
+
+      - name: Upload Debian package
+        uses: actions/upload-artifact@v4
+        with:
+          name: airbot-play-rust-deb
+          path: target/debian/*.deb
+          if-no-files-found: error

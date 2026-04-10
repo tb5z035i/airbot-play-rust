@@ -100,6 +100,42 @@ Or build only the WebSocket adapter:
 cargo build --bin airbot-play-ws
 ```
 
+## Debian package
+
+This repo includes a `cargo-deb` configuration that packages the Rust CLI tools
+together with the AIRBOT CAN setup helpers under `root/`.
+
+Build the package locally from a prepared checkout:
+
+```bash
+cargo install cargo-deb --locked
+cargo deb --locked
+```
+
+The resulting package is written to `target/debian/*.deb` and installs:
+
+- the Rust CLI tools under `/usr/bin`
+- the udev rules under `/lib/udev/rules.d`
+- the `slcan@.service` unit under `/lib/systemd/system`
+
+## Source checkout host setup
+
+If you are using this repo directly as a Rust crate instead of installing the
+generated `.deb`, install the host-side CAN setup files from the checkout:
+
+```bash
+sudo ./scripts/install-system-setup.sh
+```
+
+By default this installs:
+
+- helper scripts under `/usr/local/bin`
+- udev rules under `/etc/udev/rules.d`
+- the `slcan@.service` unit under `/etc/systemd/system`
+
+You can override the helper-script prefix with `--prefix /some/path`, or skip
+module loading and service reloads with `--skip-modprobe` / `--skip-reload`.
+
 ## Running the tools
 
 Start the WebSocket adapter:
@@ -143,4 +179,4 @@ export AIRBOT_PINOCCHIO_DEP_PREFIX=/path/to/prefix
 
 ## CI
 
-The repository-level GitHub Actions workflow installs the system packages, applies `patches/pinocchio-static-build.patch`, and builds the crate from a clean checkout. Use that workflow as the reference for a reproducible build environment.
+The repository-level GitHub Actions workflow installs the system packages, applies `patches/pinocchio-static-build.patch`, builds the crate from a clean checkout, and uploads a `.deb` artifact built via `cargo-deb`. Use that workflow as the reference for a reproducible build environment.

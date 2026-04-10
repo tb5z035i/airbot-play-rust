@@ -3,6 +3,8 @@ name = "airbot_play_rust"
 version = "0.1.0"
 edition = "2024"
 build = "build.rs"
+description = "AIRBOT Play Rust driver and CLI tooling"
+readme = "README.md"
 
 [features]
 default = ["iceoryx2-transport"]
@@ -49,3 +51,26 @@ path = "bin/airbot-play-ws.rs"
 name = "airbot-play-iceoryx2"
 path = "bin/airbot-play-iceoryx2.rs"
 required-features = ["iceoryx2-transport"]
+
+[package.metadata.deb]
+name = "airbot-play-rust"
+maintainer = "DISCOVER Robotics Limited <george@discover-robotics.com>"
+copyright = "2026, DISCOVER Robotics Limited"
+depends = "$auto, can-utils, iproute2, kmod, udev, usbutils"
+extended-description-file = "README.md"
+maintainer-scripts = "root/DEBIAN"
+section = "utils"
+priority = "optional"
+assets = [
+    ["target/release/airbot-can-diag", "usr/bin/", "755"],
+    ["target/release/airbot-play-probe", "usr/bin/", "755"],
+    ["target/release/airbot-play-ws", "usr/bin/", "755"],
+    ["target/release/airbot-play-iceoryx2", "usr/bin/", "755"],
+    ["root/bin/bind_airbot_device", "usr/bin/", "755"],
+    ["root/bin/can_add.sh", "usr/bin/", "755"],
+    ["root/bin/slcan_add.sh", "usr/bin/", "755"],
+    ["root/lib/udev/rules.d/90-usb-can.rules", "lib/udev/rules.d/90-usb-can.rules", "644"],
+    ["root/lib/udev/rules.d/90-usb-slcan.rules", "lib/udev/rules.d/90-usb-slcan.rules", "644"],
+    ["root/lib/systemd/system/slcan@.service", "lib/systemd/system/slcan@.service", "644"],
+    ["README.md", "usr/share/doc/airbot-play-rust/README.md", "644"],
+]

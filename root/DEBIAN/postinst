@@ -1,0 +1,35 @@
+#!/bin/sh
+
+set -e
+
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+
+maybe_load_module() {
+    module="$1"
+    if [ -r /proc/modules ] && grep -q "^${module} " /proc/modules; then
+        return 0
+    fi
+
+    if command -v modprobe >/dev/null 2>&1; then
+        echo "Trying to load kernel module ${module}"
+        modprobe "$module" || echo "Warning: failed to load module ${module}" >&2
+    fi
+}
+
+maybe_load_module can
+maybe_load_module can_raw
+maybe_load_module slcan
+maybe_load_module can_dev
+
+if command -v udevadm >/dev/null 2>&1; then
+    udevadm control --reload-rules || true
+    udevadm trigger || true
+fi
+
+if command -v systemctl >/dev/null 2>&1; then
+    systemctl daemon-reload || true
+    systemctl restart systemd-udevd.service || systemctl restart udev || true
+fi
+
+exit 0

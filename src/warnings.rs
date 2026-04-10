@@ -8,6 +8,7 @@ pub enum WarningKind {
     ControlRateLow,
     ControlTickOverrun,
     StaleCommandReplay,
+    InvalidGravityCompensation,
     PartialFrameAssembly,
     UnmatchedFrame,
     MalformedFrame,

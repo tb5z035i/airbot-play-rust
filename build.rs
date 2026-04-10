@@ -107,7 +107,11 @@ fn main() {
     }
 }
 
-fn build_native(manifest_dir: &Path, dependency_prefix: &Path, dependency_lib_dir: &Path) -> PathBuf {
+fn build_native(
+    manifest_dir: &Path,
+    dependency_prefix: &Path,
+    dependency_lib_dir: &Path,
+) -> PathBuf {
     let mut config = cmake::Config::new(manifest_dir.join("ffi"));
     let urdfdom_headers_dir = find_urdfdom_headers_cmake_dir(dependency_prefix, dependency_lib_dir)
         .expect("failed to locate urdfdom_headers CMake config dir");
@@ -196,7 +200,9 @@ fn find_pinocchio_dependency_lib_dir(prefix: &Path) -> io::Result<PathBuf> {
     }
 
     for candidate in candidates {
-        if candidate.join("urdfdom/cmake/urdfdom-config.cmake").exists()
+        if candidate
+            .join("urdfdom/cmake/urdfdom-config.cmake")
+            .exists()
             || candidate.join("pkgconfig/urdfdom.pc").exists()
             || candidate.join("liburdfdom_model.so").exists()
             || candidate.join("liburdfdom_model.a").exists()
@@ -207,7 +213,10 @@ fn find_pinocchio_dependency_lib_dir(prefix: &Path) -> io::Result<PathBuf> {
 
     Err(io::Error::new(
         io::ErrorKind::NotFound,
-        format!("unable to locate dependency library dir under {}", prefix.display()),
+        format!(
+            "unable to locate dependency library dir under {}",
+            prefix.display()
+        ),
     ))
 }
 
@@ -233,10 +242,7 @@ fn find_urdfdom_headers_include_dir(prefix: &Path) -> io::Result<PathBuf> {
 }
 
 fn find_urdfdom_parser_include_dir(prefix: &Path) -> io::Result<PathBuf> {
-    let candidates = [
-        prefix.join("include/urdfdom"),
-        prefix.join("include"),
-    ];
+    let candidates = [prefix.join("include/urdfdom"), prefix.join("include")];
 
     for candidate in candidates {
         if candidate.join("urdf_parser/urdf_parser.h").exists() {
@@ -262,7 +268,9 @@ fn find_urdfdom_headers_cmake_dir(prefix: &Path, lib_dir: &Path) -> io::Result<P
 
     for candidate in candidates {
         if candidate.join("urdfdom_headers-config.cmake").exists()
-            || candidate.join("urdfdom_headers-config-version.cmake").exists()
+            || candidate
+                .join("urdfdom_headers-config-version.cmake")
+                .exists()
         {
             return Ok(candidate);
         }
@@ -278,10 +286,7 @@ fn find_urdfdom_headers_cmake_dir(prefix: &Path, lib_dir: &Path) -> io::Result<P
 }
 
 fn find_urdfdom_cmake_dir(lib_dir: &Path) -> io::Result<PathBuf> {
-    let candidates = [
-        lib_dir.join("urdfdom/cmake"),
-        lib_dir.join("urdfdom"),
-    ];
+    let candidates = [lib_dir.join("urdfdom/cmake"), lib_dir.join("urdfdom")];
 
     for candidate in candidates {
         if candidate.join("urdfdom-config.cmake").exists()
@@ -379,9 +384,7 @@ fn find_prefix_in_env(var: &str) -> io::Result<Option<PathBuf>> {
 }
 
 fn is_pinocchio_dependency_prefix(prefix: &Path) -> io::Result<bool> {
-    Ok(
-        find_pinocchio_dependency_lib_dir(prefix).is_ok()
-            && find_urdfdom_headers_include_dir(prefix).is_ok()
-            && find_urdfdom_parser_include_dir(prefix).is_ok(),
-    )
+    Ok(find_pinocchio_dependency_lib_dir(prefix).is_ok()
+        && find_urdfdom_headers_include_dir(prefix).is_ok()
+        && find_urdfdom_parser_include_dir(prefix).is_ok())
 }

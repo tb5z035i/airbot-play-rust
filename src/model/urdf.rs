@@ -43,6 +43,21 @@ pub const DEFAULT_GRAVITY_COEFFICIENTS_E2B: [f64; 6] = [0.6, 0.6, 0.6, 1.338, 1.
 pub const DEFAULT_GRAVITY_COEFFICIENTS_G2: [f64; 6] = [0.6, 0.6, 0.6, 1.303, 1.181, 1.5];
 pub const DEFAULT_GRAVITY_COEFFICIENTS_OTHER: [f64; 6] = [0.6, 0.6, 0.6, 1.5, 1.5, 1.5];
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct GravityCoefficientIssue {
+    pub invalid_joint_numbers: Vec<usize>,
+}
+
+impl GravityCoefficientIssue {
+    pub(crate) fn invalid_joint_numbers_csv(&self) -> String {
+        self.invalid_joint_numbers
+            .iter()
+            .map(|joint| joint.to_string())
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+}
+
 const PLAY_URDF: &str = include_str!("../../assets/urdf/play.urdf");
 const PLAY_E2_URDF: &str = include_str!("../../assets/urdf/play_e2.urdf");
 const PLAY_G2_URDF: &str = include_str!("../../assets/urdf/play_g2.urdf");
@@ -54,6 +69,34 @@ pub fn gravity_coefficients_for_eef(mounted_eef: &MountedEefType) -> [f64; 6] {
         MountedEefType::G2 => DEFAULT_GRAVITY_COEFFICIENTS_G2,
         MountedEefType::Other(_) => DEFAULT_GRAVITY_COEFFICIENTS_OTHER,
     }
+}
+
+pub(crate) fn sanitize_gravity_coefficients(
+    coefficients: [f64; 6],
+) -> ([f64; 6], Option<GravityCoefficientIssue>) {
+    let invalid_joint_numbers = coefficients
+        .iter()
+        .enumerate()
+        .filter_map(|(index, coefficient)| (!coefficient.is_finite()).then_some(index + 1))
+        .collect::<Vec<_>>();
+    if invalid_joint_numbers.is_empty() {
+        (coefficients, None)
+    } else {
+        (
+            DEFAULT_GRAVITY_COEFFICIENTS_OTHER,
+            Some(GravityCoefficientIssue {
+                invalid_joint_numbers,
+            }),
+        )
+    }
+}
+
+pub(crate) fn format_gravity_coefficients(coefficients: &[f64; 6]) -> String {
+    coefficients
+        .iter()
+        .map(|coefficient| format!("{coefficient:.3}"))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 pub fn bundled_urdf_xml(mounted_eef: &MountedEefType) -> Result<String, ModelError> {
@@ -69,4 +112,25 @@ pub fn bundled_urdf_xml(mounted_eef: &MountedEefType) -> Result<String, ModelErr
 
 pub fn default_frame_name(_mounted_eef: &MountedEefType) -> &'static str {
     "end_link"
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        DEFAULT_GRAVITY_COEFFICIENTS_OTHER, GravityCoefficientIssue, sanitize_gravity_coefficients,
+    };
+
+    #[test]
+    fn sanitize_gravity_coefficients_replaces_non_finite_values() {
+        let (sanitized, issue) =
+            sanitize_gravity_coefficients([0.6, f64::NAN, 0.6, 1.5, f64::INFINITY, 1.5]);
+
+        assert_eq!(sanitized, DEFAULT_GRAVITY_COEFFICIENTS_OTHER);
+        assert_eq!(
+            issue,
+            Some(GravityCoefficientIssue {
+                invalid_joint_numbers: vec![2, 5],
+            })
+        );
+    }
 }

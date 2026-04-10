@@ -1,6 +1,7 @@
 use super::command_slot::{ARM_DOF, CommandSlot, JointTarget};
 use crate::can::realtime::{configure_sched_fifo, lock_memory, set_current_thread_affinity};
 use crate::can::worker::{CanTxPriority, CanWorker, CanWorkerError};
+use crate::model::urdf::{format_gravity_coefficients, sanitize_gravity_coefficients};
 use crate::model::{
     KinematicsDynamicsBackend, ModelError, MountedEefType, Pose, gravity_coefficients_for_eef,
 };
@@ -186,6 +187,17 @@ impl PlayArm {
         let gravity_coefficients = extract_gravity_coefficients(&gravity_outcome)
             .and_then(|values| values.get(mounted_eef.as_label()).copied())
             .unwrap_or_else(|| gravity_coefficients_for_eef(&mounted_eef));
+        let (gravity_coefficients, issue) = sanitize_gravity_coefficients(gravity_coefficients);
+        if let Some(issue) = issue {
+            let invalid_joint_numbers = issue.invalid_joint_numbers_csv();
+            let fallback_coefficients = format_gravity_coefficients(&gravity_coefficients);
+            warn!(
+                mounted_eef = %mounted_eef.as_label(),
+                invalid_joint_numbers = %invalid_joint_numbers,
+                fallback_coefficients = %fallback_coefficients,
+                "board-reported gravity compensation coefficients contained non-finite values; using fallback coefficients during bootstrap"
+            );
+        }
 
         Ok(ArmBootstrapInfo {
             mounted_eef,
@@ -209,10 +221,35 @@ impl PlayArm {
     }
 
     pub fn set_gravity_coefficients(&self, coefficients: [f64; ARM_DOF]) {
+        let (coefficients, issue) = sanitize_gravity_coefficients(coefficients);
         *self
             .gravity_coefficients
             .write()
             .expect("gravity coefficient lock poisoned") = coefficients;
+
+        if let Some(issue) = issue {
+            let invalid_joint_numbers = issue.invalid_joint_numbers_csv();
+            let fallback_coefficients = format_gravity_coefficients(&coefficients);
+            warn!(
+                interface = %self.interface,
+                mounted_eef = %self.mounted_eef.as_label(),
+                invalid_joint_numbers = %invalid_joint_numbers,
+                fallback_coefficients = %fallback_coefficients,
+                "gravity compensation coefficients contained non-finite values; using fallback coefficients"
+            );
+            self.publish_warning(
+                WarningEvent::new(
+                    WarningKind::InvalidGravityCompensation,
+                    format!(
+                        "gravity compensation coefficients contained non-finite values; using fallback coefficients ({fallback_coefficients})"
+                    ),
+                )
+                .with_interface(self.interface.clone())
+                .with_detail("mounted_eef", self.mounted_eef.as_label().to_owned())
+                .with_detail("invalid_joint_numbers", invalid_joint_numbers)
+                .with_detail("fallback_coefficients", fallback_coefficients),
+            );
+        }
     }
 
     pub fn state(&self) -> ArmState {

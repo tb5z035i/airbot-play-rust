@@ -59,12 +59,9 @@ mod tests {
 
     #[test]
     fn model_backend_flag_parses() {
-        let args = Args::try_parse_from([
-            "airbot-play-iceoryx2",
-            "--model-backend",
-            "play-analytical",
-        ])
-        .expect("CLI should accept the analytical backend");
+        let args =
+            Args::try_parse_from(["airbot-play-iceoryx2", "--model-backend", "play-analytical"])
+                .expect("CLI should accept the analytical backend");
         assert_eq!(args.model_backend, ModelBackendKind::PlayAnalytical);
     }
 

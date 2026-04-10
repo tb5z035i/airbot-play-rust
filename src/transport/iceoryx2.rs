@@ -1,8 +1,6 @@
 use crate::arm::{ARM_DOF, ArmJointFeedback, ArmState, JointTarget};
 use crate::can::worker::CanWorkerBackend;
-use crate::client::{
-    AccessMode, AirbotPlayClient, ClientError, ConnectedRobotInfo, RequestTarget,
-};
+use crate::client::{AccessMode, AirbotPlayClient, ClientError, ConnectedRobotInfo, RequestTarget};
 use crate::eef::{EefState, SingleEefCommand, SingleEefFeedback};
 use crate::model::{ModelBackendKind, MountedEefType, Pose};
 use crate::request_service::RequestOutcome;
@@ -248,9 +246,7 @@ trait TransportClient: Send + Sync {
         name: &str,
     ) -> Result<RequestOutcome, ClientError>;
     async fn query_mounted_eef(&self) -> Result<MountedEefType, ClientError>;
-    async fn query_gravity_coefficients(
-        &self,
-    ) -> Result<BTreeMap<String, [f64; 6]>, ClientError>;
+    async fn query_gravity_coefficients(&self) -> Result<BTreeMap<String, [f64; 6]>, ClientError>;
     fn query_current_pose(&self) -> Result<Pose, ClientError>;
     async fn set_arm_state(&self, state: ArmState) -> Result<(), ClientError>;
     fn submit_joint_target(&self, positions: [f64; ARM_DOF]) -> Result<JointTarget, ClientError>;
@@ -293,9 +289,7 @@ impl TransportClient for AirbotPlayClient {
         AirbotPlayClient::query_mounted_eef(self).await
     }
 
-    async fn query_gravity_coefficients(
-        &self,
-    ) -> Result<BTreeMap<String, [f64; 6]>, ClientError> {
+    async fn query_gravity_coefficients(&self) -> Result<BTreeMap<String, [f64; 6]>, ClientError> {
         AirbotPlayClient::query_gravity_coefficients(self).await
     }
 
@@ -837,7 +831,10 @@ mod tests {
             Ok(())
         }
 
-        fn submit_joint_target(&self, positions: [f64; ARM_DOF]) -> Result<JointTarget, ClientError> {
+        fn submit_joint_target(
+            &self,
+            positions: [f64; ARM_DOF],
+        ) -> Result<JointTarget, ClientError> {
             self.joint_targets
                 .lock()
                 .expect("joint targets lock poisoned")
@@ -853,10 +850,7 @@ mod tests {
             Ok(())
         }
 
-        async fn submit_e2_command(
-            &self,
-            _command: &SingleEefCommand,
-        ) -> Result<(), ClientError> {
+        async fn submit_e2_command(&self, _command: &SingleEefCommand) -> Result<(), ClientError> {
             Ok(())
         }
 
@@ -891,23 +885,27 @@ mod tests {
                 let client = Arc::new(FakeClient::new());
                 let (shutdown_tx, shutdown_rx) = oneshot::channel();
 
-                let task = tokio::task::spawn_local(run_iceoryx2_transport_with_client_and_shutdown(
-                    Iceoryx2TransportConfig {
-                        service_root: service_root.clone(),
-                        interface: "can0".to_owned(),
-                        allow_control: true,
-                        can_backend: CanWorkerBackend::AsyncFd,
-                        model_backend: ModelBackendKind::PlayAnalytical,
-                        poll_interval: Duration::from_millis(10),
-                        max_message_size: 4096,
-                    },
-                    Arc::clone(&client),
-                    async move {
-                        shutdown_rx.await.map_err(|_| {
-                            std::io::Error::new(std::io::ErrorKind::BrokenPipe, "shutdown dropped")
-                        })
-                    },
-                ));
+                let task =
+                    tokio::task::spawn_local(run_iceoryx2_transport_with_client_and_shutdown(
+                        Iceoryx2TransportConfig {
+                            service_root: service_root.clone(),
+                            interface: "can0".to_owned(),
+                            allow_control: true,
+                            can_backend: CanWorkerBackend::AsyncFd,
+                            model_backend: ModelBackendKind::PlayAnalytical,
+                            poll_interval: Duration::from_millis(10),
+                            max_message_size: 4096,
+                        },
+                        Arc::clone(&client),
+                        async move {
+                            shutdown_rx.await.map_err(|_| {
+                                std::io::Error::new(
+                                    std::io::ErrorKind::BrokenPipe,
+                                    "shutdown dropped",
+                                )
+                            })
+                        },
+                    ));
 
                 sleep(Duration::from_millis(50)).await;
                 send_request(
@@ -929,7 +927,10 @@ mod tests {
                     other => panic!("unexpected event: {other:?}"),
                 }
 
-                send_request(&ports.request_publisher, &Iceoryx2Request::SubscribeArmFeedback)?;
+                send_request(
+                    &ports.request_publisher,
+                    &Iceoryx2Request::SubscribeArmFeedback,
+                )?;
                 let ack = receive_event(&ports.event_subscriber).await?;
                 assert_eq!(
                     ack,
@@ -974,23 +975,27 @@ mod tests {
                 let client = Arc::new(FakeClient::new());
                 let (shutdown_tx, shutdown_rx) = oneshot::channel();
 
-                let task = tokio::task::spawn_local(run_iceoryx2_transport_with_client_and_shutdown(
-                    Iceoryx2TransportConfig {
-                        service_root: service_root.clone(),
-                        interface: "can0".to_owned(),
-                        allow_control: true,
-                        can_backend: CanWorkerBackend::AsyncFd,
-                        model_backend: ModelBackendKind::PlayAnalytical,
-                        poll_interval: Duration::from_millis(10),
-                        max_message_size: 4096,
-                    },
-                    Arc::clone(&client),
-                    async move {
-                        shutdown_rx.await.map_err(|_| {
-                            std::io::Error::new(std::io::ErrorKind::BrokenPipe, "shutdown dropped")
-                        })
-                    },
-                ));
+                let task =
+                    tokio::task::spawn_local(run_iceoryx2_transport_with_client_and_shutdown(
+                        Iceoryx2TransportConfig {
+                            service_root: service_root.clone(),
+                            interface: "can0".to_owned(),
+                            allow_control: true,
+                            can_backend: CanWorkerBackend::AsyncFd,
+                            model_backend: ModelBackendKind::PlayAnalytical,
+                            poll_interval: Duration::from_millis(10),
+                            max_message_size: 4096,
+                        },
+                        Arc::clone(&client),
+                        async move {
+                            shutdown_rx.await.map_err(|_| {
+                                std::io::Error::new(
+                                    std::io::ErrorKind::BrokenPipe,
+                                    "shutdown dropped",
+                                )
+                            })
+                        },
+                    ));
 
                 sleep(Duration::from_millis(50)).await;
                 send_request(
@@ -1029,7 +1034,10 @@ mod tests {
                     other => panic!("unexpected event: {other:?}"),
                 }
 
-                let state_calls = client.state_calls.lock().expect("state calls lock poisoned");
+                let state_calls = client
+                    .state_calls
+                    .lock()
+                    .expect("state calls lock poisoned");
                 assert!(state_calls.contains(&ArmState::CommandFollowing));
                 drop(state_calls);
 
@@ -1037,7 +1045,10 @@ mod tests {
                     .joint_targets
                     .lock()
                     .expect("joint targets lock poisoned");
-                assert_eq!(targets.last().copied(), Some([1.0, 1.1, 1.2, 1.3, 1.4, 1.5]));
+                assert_eq!(
+                    targets.last().copied(),
+                    Some([1.0, 1.1, 1.2, 1.3, 1.4, 1.5])
+                );
                 drop(targets);
 
                 shutdown_tx.send(()).expect("shutdown should succeed");
@@ -1058,23 +1069,27 @@ mod tests {
                 let client = Arc::new(FakeClient::new());
                 let (shutdown_tx, shutdown_rx) = oneshot::channel();
 
-                let task = tokio::task::spawn_local(run_iceoryx2_transport_with_client_and_shutdown(
-                    Iceoryx2TransportConfig {
-                        service_root: service_root.clone(),
-                        interface: "can0".to_owned(),
-                        allow_control: false,
-                        can_backend: CanWorkerBackend::AsyncFd,
-                        model_backend: ModelBackendKind::PlayAnalytical,
-                        poll_interval: Duration::from_millis(10),
-                        max_message_size: 4096,
-                    },
-                    Arc::clone(&client),
-                    async move {
-                        shutdown_rx.await.map_err(|_| {
-                            std::io::Error::new(std::io::ErrorKind::BrokenPipe, "shutdown dropped")
-                        })
-                    },
-                ));
+                let task =
+                    tokio::task::spawn_local(run_iceoryx2_transport_with_client_and_shutdown(
+                        Iceoryx2TransportConfig {
+                            service_root: service_root.clone(),
+                            interface: "can0".to_owned(),
+                            allow_control: false,
+                            can_backend: CanWorkerBackend::AsyncFd,
+                            model_backend: ModelBackendKind::PlayAnalytical,
+                            poll_interval: Duration::from_millis(10),
+                            max_message_size: 4096,
+                        },
+                        Arc::clone(&client),
+                        async move {
+                            shutdown_rx.await.map_err(|_| {
+                                std::io::Error::new(
+                                    std::io::ErrorKind::BrokenPipe,
+                                    "shutdown dropped",
+                                )
+                            })
+                        },
+                    ));
 
                 sleep(Duration::from_millis(50)).await;
                 send_request(
@@ -1096,7 +1111,10 @@ mod tests {
                     other => panic!("unexpected event: {other:?}"),
                 }
 
-                send_request(&ports.request_publisher, &Iceoryx2Request::SubscribeWarnings)?;
+                send_request(
+                    &ports.request_publisher,
+                    &Iceoryx2Request::SubscribeWarnings,
+                )?;
                 let _ack = receive_event(&ports.event_subscriber).await?;
                 client.emit_warning(
                     WarningEvent::new(WarningKind::MalformedFrame, "test warning")
@@ -1158,7 +1176,8 @@ mod tests {
             .signal_handling_mode(SignalHandlingMode::Disabled)
             .create::<ipc::Service>()?;
 
-        let request_service_name: ServiceName = format!("{service_root}/requests").as_str().try_into()?;
+        let request_service_name: ServiceName =
+            format!("{service_root}/requests").as_str().try_into()?;
         let request_service = node
             .service_builder(&request_service_name)
             .publish_subscribe::<[u8]>()
@@ -1168,7 +1187,8 @@ mod tests {
             .initial_max_slice_len(max_message_size)
             .create()?;
 
-        let event_service_name: ServiceName = format!("{service_root}/events").as_str().try_into()?;
+        let event_service_name: ServiceName =
+            format!("{service_root}/events").as_str().try_into()?;
         let event_service = node
             .service_builder(&event_service_name)
             .publish_subscribe::<[u8]>()

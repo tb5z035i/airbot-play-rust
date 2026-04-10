@@ -4,6 +4,9 @@ use crate::can::worker::{
     CanTxPriority, CanWorker, CanWorkerBackend, CanWorkerConfig, CanWorkerError,
 };
 use crate::eef::{E2, EefState, G2, SingleEefCommand, SingleEefFeedback};
+use crate::model::urdf::{
+    GravityCoefficientIssue, format_gravity_coefficients, sanitize_gravity_coefficients,
+};
 use crate::model::{ModelBackendKind, ModelError, ModelRegistry, MountedEefType, Pose};
 use crate::motor::{MotorRuntime, MotorRuntimeError};
 use crate::protocol::board::BoardProtocol;
@@ -16,7 +19,7 @@ use crate::request_service::{RequestError, RequestOutcome, RequestService};
 use crate::types::RawCanFrame;
 use crate::types::{DecodedFrame, ParamValue, ProtocolNodeKind};
 use crate::warning_bus::WarningBus;
-use crate::warnings::WarningEvent;
+use crate::warnings::{WarningEvent, WarningKind};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -222,6 +225,7 @@ impl AirbotPlayClient {
             warning_bus.clone(),
         ));
         arm.set_gravity_coefficients(bootstrap.gravity_coefficients);
+        let gravity_coefficients = arm.gravity_coefficients();
 
         let e2 = Arc::new(E2::new(7));
         let g2 = Arc::new(G2::new(7));
@@ -235,7 +239,7 @@ impl AirbotPlayClient {
                 access_mode,
                 mounted_eef: bootstrap.mounted_eef,
                 model_backend,
-                gravity_coefficients: bootstrap.gravity_coefficients,
+                gravity_coefficients,
             },
             request_service,
             worker,
@@ -389,14 +393,27 @@ impl AirbotPlayClient {
         let outcome = self
             .query_param(RequestTarget::PlayBaseBoard, "gravity_comp_param")
             .await?;
-        Ok(extract_gravity_coefficients(&outcome).unwrap_or_else(|| {
+        let coefficients_by_eef = extract_gravity_coefficients(&outcome).unwrap_or_else(|| {
             let mut fallback = BTreeMap::new();
             fallback.insert(
                 self.info.mounted_eef.as_label().to_owned(),
                 self.info.gravity_coefficients,
             );
             fallback
-        }))
+        });
+        let (sanitized, issues) = sanitize_gravity_coefficients_by_eef(coefficients_by_eef);
+        for (eef_label, issue) in &issues {
+            if let Some(coefficients) = sanitized.get(eef_label) {
+                publish_invalid_gravity_coefficients_warning(
+                    &self.warning_bus,
+                    &self.info.interface,
+                    eef_label,
+                    issue,
+                    coefficients,
+                );
+            }
+        }
+        Ok(sanitized)
     }
 
     pub fn query_current_pose(&self) -> Result<Pose, ClientError> {
@@ -608,12 +625,59 @@ fn extract_gravity_coefficients(outcome: &RequestOutcome) -> Option<BTreeMap<Str
     Some(by_eef)
 }
 
+fn sanitize_gravity_coefficients_by_eef(
+    coefficients_by_eef: BTreeMap<String, [f64; 6]>,
+) -> (
+    BTreeMap<String, [f64; 6]>,
+    Vec<(String, GravityCoefficientIssue)>,
+) {
+    let mut sanitized = BTreeMap::new();
+    let mut issues = Vec::new();
+    for (eef_label, coefficients) in coefficients_by_eef {
+        let (coefficients, issue) = sanitize_gravity_coefficients(coefficients);
+        if let Some(issue) = issue {
+            issues.push((eef_label.clone(), issue));
+        }
+        sanitized.insert(eef_label, coefficients);
+    }
+    (sanitized, issues)
+}
+
+fn publish_invalid_gravity_coefficients_warning(
+    warning_bus: &WarningBus,
+    interface: &str,
+    eef_label: &str,
+    issue: &GravityCoefficientIssue,
+    fallback_coefficients: &[f64; 6],
+) {
+    warning_bus.publish(
+        WarningEvent::new(
+            WarningKind::InvalidGravityCompensation,
+            format!(
+                "gravity compensation coefficients for `{eef_label}` contained non-finite values; using fallback coefficients ({})",
+                format_gravity_coefficients(fallback_coefficients)
+            ),
+        )
+        .with_interface(interface.to_owned())
+        .with_detail("eef_label", eef_label.to_owned())
+        .with_detail(
+            "invalid_joint_numbers",
+            issue.invalid_joint_numbers_csv(),
+        )
+        .with_detail(
+            "fallback_coefficients",
+            format_gravity_coefficients(fallback_coefficients),
+        ),
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        AccessMode, ConnectedRobotInfo, build_shutdown_disable_frames, extract_gravity_coefficients,
+        AccessMode, ConnectedRobotInfo, build_shutdown_disable_frames,
+        extract_gravity_coefficients, sanitize_gravity_coefficients_by_eef,
     };
-    use crate::model::ModelBackendKind;
+    use crate::model::{DEFAULT_GRAVITY_COEFFICIENTS_OTHER, ModelBackendKind};
     use crate::request_service::RequestOutcome;
     use crate::types::{DecodedFrame, FrameKind, ParamValue, ProtocolNode, ProtocolNodeKind};
     use std::collections::BTreeMap;
@@ -648,6 +712,23 @@ mod tests {
         assert_eq!(by_eef["E2B"], [6.0, 7.0, 8.0, 9.0, 10.0, 11.0]);
         assert_eq!(by_eef["G2"], [12.0, 13.0, 14.0, 15.0, 16.0, 17.0]);
         assert_eq!(by_eef["other"], [18.0, 19.0, 20.0, 21.0, 22.0, 23.0]);
+    }
+
+    #[test]
+    fn sanitize_gravity_coefficients_by_eef_replaces_non_finite_chunks() {
+        let (sanitized, issues) = sanitize_gravity_coefficients_by_eef(BTreeMap::from([
+            ("none".to_owned(), [0.6, 0.6, 0.6, 1.6, 1.248, 1.5]),
+            (
+                "G2".to_owned(),
+                [0.6, f64::NAN, 0.6, 1.303, f64::INFINITY, 1.5],
+            ),
+        ]));
+
+        assert_eq!(sanitized["none"], [0.6, 0.6, 0.6, 1.6, 1.248, 1.5]);
+        assert_eq!(sanitized["G2"], DEFAULT_GRAVITY_COEFFICIENTS_OTHER);
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].0, "G2");
+        assert_eq!(issues[0].1.invalid_joint_numbers, vec![2, 5]);
     }
 
     #[test]

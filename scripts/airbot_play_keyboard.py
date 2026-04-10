@@ -26,6 +26,8 @@ Controls:
 
 Notes:
     - This script talks to `airbot-play-ws`; it does not access CAN directly.
+    - For an explicitly named websocket entrypoint, use
+      `scripts/airbot_play_ws_keyboard.py`.
     - For joint motion commands, use `command_following`.
     - For state-only monitoring without motion, `free_drive` is usually the most useful.
 """
@@ -34,6 +36,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import json
 import math
 import os
@@ -399,8 +402,6 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-    import contextlib
-
     try:
         asyncio.run(main())
     except KeyboardInterrupt:

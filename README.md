@@ -54,9 +54,12 @@ On Ubuntu 24.04 / Debian-like systems, the following packages are sufficient for
 sudo apt-get update
 sudo apt-get install -y \
   build-essential \
+  clang \
   cmake \
+  libclang-dev \
   pkg-config \
   patch \
+  llvm-dev \
   libeigen3-dev \
   libboost-filesystem-dev \
   libboost-serialization-dev \
@@ -66,6 +69,10 @@ sudo apt-get install -y \
   liburdfdom-dev \
   liburdfdom-headers-dev
 ```
+
+`clang`, `libclang-dev`, and `llvm-dev` are required for the vendored
+`iceoryx2` bindgen steps. If a build fails with errors like
+`fatal error: 'stddef.h' file not found`, install those packages first.
 
 ## Clone and build
 

@@ -3,6 +3,12 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PinocchioLinkMode {
+    Static,
+    Dynamic,
+}
+
 fn main() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("missing manifest dir"));
     let dependency_prefix =
@@ -43,8 +49,10 @@ fn main() {
 
     let native_install = build_native(&manifest_dir, &dependency_prefix, &dependency_lib_dir);
     let native_lib_dir = native_install.join("lib");
+    let link_mode = detect_pinocchio_link_mode(&native_lib_dir);
 
-    cxx_build::bridges(["src/model/pinocchio_ffi.rs"])
+    let mut bridge = cxx_build::bridges(["src/model/pinocchio_ffi.rs"]);
+    bridge
         .file(manifest_dir.join("ffi/pinocchio_shim.cpp"))
         .include(&manifest_dir)
         .include(native_install.join("include"))
@@ -52,10 +60,13 @@ fn main() {
         .include("/usr/include/eigen3")
         .include(&urdfdom_parser_include_dir)
         .include(&urdfdom_headers_include_dir)
-        .define("PINOCCHIO_STATIC", None)
-        .define("PINOCCHIO_PARSERS_STATIC", None)
-        .flag_if_supported("-std=c++17")
-        .compile("airbot_pinocchio_ffi");
+        .flag_if_supported("-std=c++17");
+    if link_mode == PinocchioLinkMode::Static {
+        bridge
+            .define("PINOCCHIO_STATIC", None)
+            .define("PINOCCHIO_PARSERS_STATIC", None);
+    }
+    bridge.compile("airbot_pinocchio_ffi");
 
     println!(
         "cargo:rustc-link-search=native={}",
@@ -65,8 +76,16 @@ fn main() {
         "cargo:rustc-link-search=native={}",
         dependency_lib_dir.display()
     );
-    println!("cargo:rustc-link-lib=static=pinocchio_parsers");
-    println!("cargo:rustc-link-lib=static=pinocchio_default");
+    println!(
+        "cargo:rustc-link-lib={}={}",
+        link_mode.rustc_link_kind(),
+        "pinocchio_parsers"
+    );
+    println!(
+        "cargo:rustc-link-lib={}={}",
+        link_mode.rustc_link_kind(),
+        "pinocchio_default"
+    );
     println!("cargo:rustc-link-lib=dylib=boost_filesystem");
     println!("cargo:rustc-link-lib=dylib=boost_serialization");
     println!("cargo:rustc-link-lib=dylib=urdfdom_sensor");
@@ -82,6 +101,7 @@ fn main() {
             "cargo:rustc-link-arg-tests",
             "cargo:rustc-link-arg-bins",
         ] {
+            println!("{scope}=-Wl,-rpath,{}", native_lib_dir.display());
             println!("{scope}=-Wl,-rpath,{}", dependency_lib_dir.display());
         }
     }
@@ -140,6 +160,25 @@ fn native_parallel_jobs() -> usize {
         })
         .or_else(|| std::thread::available_parallelism().ok().map(usize::from))
         .unwrap_or(1)
+}
+
+fn detect_pinocchio_link_mode(native_lib_dir: &Path) -> PinocchioLinkMode {
+    if native_lib_dir.join("libpinocchio_parsers.a").exists()
+        && native_lib_dir.join("libpinocchio_default.a").exists()
+    {
+        PinocchioLinkMode::Static
+    } else {
+        PinocchioLinkMode::Dynamic
+    }
+}
+
+impl PinocchioLinkMode {
+    fn rustc_link_kind(self) -> &'static str {
+        match self {
+            Self::Static => "static",
+            Self::Dynamic => "dylib",
+        }
+    }
 }
 
 fn find_pinocchio_dependency_lib_dir(prefix: &Path) -> io::Result<PathBuf> {

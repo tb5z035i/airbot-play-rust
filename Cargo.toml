@@ -4,10 +4,16 @@ version = "0.1.0"
 edition = "2024"
 build = "build.rs"
 
+[features]
+default = ["iceoryx2-transport"]
+iceoryx2-transport = ["dep:async-trait", "dep:iceoryx2"]
+
 [dependencies]
+async-trait = { version = "0.1.89", optional = true }
 clap = { version = "4.6.0", features = ["derive"] }
 cxx = "1.0.187"
 futures-util = { version = "0.3.31", default-features = false, features = ["sink", "std"] }
+iceoryx2 = { path = "third_party/iceoryx2/iceoryx2", optional = true }
 libc = "0.2.184"
 nalgebra = "0.34.2"
 serde = { version = "1.0.228", features = ["derive"] }
@@ -38,3 +44,8 @@ path = "bin/airbot-play-probe.rs"
 [[bin]]
 name = "airbot-play-ws"
 path = "bin/airbot-play-ws.rs"
+
+[[bin]]
+name = "airbot-play-iceoryx2"
+path = "bin/airbot-play-iceoryx2.rs"
+required-features = ["iceoryx2-transport"]

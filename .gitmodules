@@ -1,3 +1,6 @@
 [submodule "third_party/pinocchio"]
 	path = third_party/pinocchio
 	url = https://github.com/stack-of-tasks/pinocchio.git
+[submodule "third_party/iceoryx2"]
+	path = third_party/iceoryx2
+	url = https://github.com/eclipse-iceoryx/iceoryx2.git

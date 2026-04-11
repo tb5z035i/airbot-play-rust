@@ -48,6 +48,14 @@ name = "airbot-play-ws"
 path = "bin/airbot-play-ws.rs"
 
 [[bin]]
+name = "airbot-play-e2-ws"
+path = "bin/airbot-play-e2-ws.rs"
+
+[[bin]]
+name = "airbot-play-g2-ws"
+path = "bin/airbot-play-g2-ws.rs"
+
+[[bin]]
 name = "airbot-play-iceoryx2"
 path = "bin/airbot-play-iceoryx2.rs"
 required-features = ["iceoryx2-transport"]
@@ -65,6 +73,8 @@ assets = [
     ["target/release/airbot-can-diag", "usr/bin/", "755"],
     ["target/release/airbot-play-probe", "usr/bin/", "755"],
     ["target/release/airbot-play-ws", "usr/bin/", "755"],
+    ["target/release/airbot-play-e2-ws", "usr/bin/", "755"],
+    ["target/release/airbot-play-g2-ws", "usr/bin/", "755"],
     ["target/release/airbot-play-iceoryx2", "usr/bin/", "755"],
     ["root/bin/bind_airbot_device", "usr/bin/", "755"],
     ["root/bin/can_add.sh", "usr/bin/", "755"],

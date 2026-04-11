@@ -1,7 +1,7 @@
 use crate::arm::{ARM_DOF, ArmJointFeedback, ArmState, JointTarget};
 use crate::can::worker::CanWorkerBackend;
 use crate::client::{AccessMode, AirbotPlayClient, ClientError, ConnectedRobotInfo, RequestTarget};
-use crate::eef::{EefState, SingleEefCommand, SingleEefFeedback};
+use crate::eef::{EefRuntimeProfile, EefState, SingleEefCommand, SingleEefFeedback};
 use crate::model::{ModelBackendKind, MountedEefType, Pose};
 use crate::request_service::RequestOutcome;
 use crate::warnings::WarningEvent;
@@ -70,6 +70,7 @@ pub struct Iceoryx2TransportConfig {
     pub allow_control: bool,
     pub can_backend: CanWorkerBackend,
     pub model_backend: ModelBackendKind,
+    pub eef_profile: EefRuntimeProfile,
     pub poll_interval: Duration,
     pub max_message_size: usize,
 }
@@ -82,6 +83,7 @@ impl Default for Iceoryx2TransportConfig {
             allow_control: true,
             can_backend: CanWorkerBackend::AsyncFd,
             model_backend: ModelBackendKind::PlayAnalytical,
+            eef_profile: EefRuntimeProfile::Generic,
             poll_interval: Duration::from_millis(10),
             max_message_size: DEFAULT_MAX_MESSAGE_SIZE,
         }
@@ -237,6 +239,7 @@ impl EventSink<'_> {
 #[async_trait(?Send)]
 trait TransportClient: Send + Sync {
     fn info(&self) -> ConnectedRobotInfo;
+    fn ensure_eef_profile(&self, profile: EefRuntimeProfile) -> Result<(), ClientError>;
     fn subscribe_arm_feedback(&self) -> broadcast::Receiver<ArmJointFeedback>;
     fn subscribe_warnings(&self) -> broadcast::Receiver<WarningEvent>;
     fn subscribe_eef_feedback(&self) -> Option<broadcast::Receiver<SingleEefFeedback>>;
@@ -251,7 +254,7 @@ trait TransportClient: Send + Sync {
     async fn set_arm_state(&self, state: ArmState) -> Result<(), ClientError>;
     fn submit_joint_target(&self, positions: [f64; ARM_DOF]) -> Result<JointTarget, ClientError>;
     fn submit_task_target(&self, pose: &Pose) -> Result<JointTarget, ClientError>;
-    fn set_eef_state(&self, state: EefState) -> Result<(), ClientError>;
+    async fn set_eef_state(&self, state: EefState) -> Result<(), ClientError>;
     async fn submit_e2_command(&self, command: &SingleEefCommand) -> Result<(), ClientError>;
     async fn submit_g2_mit_command(&self, command: &SingleEefCommand) -> Result<(), ClientError>;
     async fn submit_g2_pvt_command(&self, command: &SingleEefCommand) -> Result<(), ClientError>;
@@ -264,6 +267,10 @@ impl TransportClient for AirbotPlayClient {
         self.info().clone()
     }
 
+    fn ensure_eef_profile(&self, profile: EefRuntimeProfile) -> Result<(), ClientError> {
+        self.require_eef_profile(profile)
+    }
+
     fn subscribe_arm_feedback(&self) -> broadcast::Receiver<ArmJointFeedback> {
         AirbotPlayClient::subscribe_arm_feedback(self)
     }
@@ -273,8 +280,7 @@ impl TransportClient for AirbotPlayClient {
     }
 
     fn subscribe_eef_feedback(&self) -> Option<broadcast::Receiver<SingleEefFeedback>> {
-        self.subscribe_e2_feedback()
-            .or_else(|| self.subscribe_g2_feedback())
+        AirbotPlayClient::subscribe_eef_feedback(self)
     }
 
     async fn query_param(
@@ -309,8 +315,8 @@ impl TransportClient for AirbotPlayClient {
         AirbotPlayClient::submit_task_target(self, pose)
     }
 
-    fn set_eef_state(&self, state: EefState) -> Result<(), ClientError> {
-        AirbotPlayClient::set_eef_state(self, state)
+    async fn set_eef_state(&self, state: EefState) -> Result<(), ClientError> {
+        AirbotPlayClient::set_eef_state(self, state).await
     }
 
     async fn submit_e2_command(&self, command: &SingleEefCommand) -> Result<(), ClientError> {
@@ -368,6 +374,7 @@ where
     S: Future<Output = Result<(), std::io::Error>>,
 {
     validate_config(&config)?;
+    client.ensure_eef_profile(config.eef_profile)?;
 
     let node = NodeBuilder::new()
         .signal_handling_mode(SignalHandlingMode::Disabled)
@@ -611,7 +618,7 @@ where
         }
         Iceoryx2Request::SetEefState { state } => {
             require_control(*connection_mode)?;
-            client.set_eef_state(state)?;
+            client.set_eef_state(state).await?;
             event_sink.send(&Iceoryx2Event::Ack {
                 message: "end-effector state updated".to_owned(),
             })?;
@@ -781,6 +788,12 @@ mod tests {
             self.info.clone()
         }
 
+        fn ensure_eef_profile(&self, profile: EefRuntimeProfile) -> Result<(), ClientError> {
+            crate::eef::EefRuntime::new(self.info.mounted_eef.clone())
+                .validate_profile(profile)
+                .map_err(ClientError::from)
+        }
+
         fn subscribe_arm_feedback(&self) -> broadcast::Receiver<ArmJointFeedback> {
             self.arm_feedback_tx.subscribe()
         }
@@ -846,7 +859,7 @@ mod tests {
             Ok(JointTarget::new([0.0; ARM_DOF]))
         }
 
-        fn set_eef_state(&self, _state: EefState) -> Result<(), ClientError> {
+        async fn set_eef_state(&self, _state: EefState) -> Result<(), ClientError> {
             Ok(())
         }
 
@@ -893,6 +906,7 @@ mod tests {
                             allow_control: true,
                             can_backend: CanWorkerBackend::AsyncFd,
                             model_backend: ModelBackendKind::PlayAnalytical,
+                            eef_profile: EefRuntimeProfile::Generic,
                             poll_interval: Duration::from_millis(10),
                             max_message_size: 4096,
                         },
@@ -983,6 +997,7 @@ mod tests {
                             allow_control: true,
                             can_backend: CanWorkerBackend::AsyncFd,
                             model_backend: ModelBackendKind::PlayAnalytical,
+                            eef_profile: EefRuntimeProfile::Generic,
                             poll_interval: Duration::from_millis(10),
                             max_message_size: 4096,
                         },
@@ -1077,6 +1092,7 @@ mod tests {
                             allow_control: false,
                             can_backend: CanWorkerBackend::AsyncFd,
                             model_backend: ModelBackendKind::PlayAnalytical,
+                            eef_profile: EefRuntimeProfile::Generic,
                             poll_interval: Duration::from_millis(10),
                             max_message_size: 4096,
                         },
@@ -1166,6 +1182,29 @@ mod tests {
                 Ok::<(), Box<dyn Error>>(())
             })
             .await
+    }
+
+    #[tokio::test]
+    async fn mismatched_eef_profile_is_rejected_before_ports_open() {
+        let client = Arc::new(FakeClient::new());
+        let error = run_iceoryx2_transport_with_client_and_shutdown(
+            Iceoryx2TransportConfig {
+                service_root: "airbot-profile-mismatch".to_owned(),
+                interface: "can0".to_owned(),
+                allow_control: true,
+                can_backend: CanWorkerBackend::AsyncFd,
+                model_backend: ModelBackendKind::PlayAnalytical,
+                eef_profile: EefRuntimeProfile::E2,
+                poll_interval: Duration::from_millis(10),
+                max_message_size: 4096,
+            },
+            client,
+            async { Ok::<(), std::io::Error>(()) },
+        )
+        .await
+        .expect_err("transport should reject mismatched EEF profiles");
+
+        assert!(error.to_string().contains("runtime profile `e2`"));
     }
 
     fn create_test_ports(

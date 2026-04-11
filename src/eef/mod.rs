@@ -1,5 +1,7 @@
+mod client;
 pub mod e2;
 pub mod g2;
+mod runtime;
 
 use serde::{Deserialize, Serialize};
 
@@ -42,5 +44,7 @@ impl Default for SingleEefCommand {
     }
 }
 
+pub use client::EefClient;
 pub use e2::{E2, E2Error};
 pub use g2::{G2, G2Error};
+pub use runtime::{EefRuntime, EefRuntimeError, EefRuntimeProfile, spawn_eef_runtime_task};

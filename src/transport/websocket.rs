@@ -1,7 +1,7 @@
 use crate::arm::{ArmJointFeedback, ArmState, JointTarget};
 use crate::can::worker::CanWorkerBackend;
 use crate::client::{AccessMode, AirbotPlayClient, ClientError, ConnectedRobotInfo, RequestTarget};
-use crate::eef::{EefState, SingleEefCommand, SingleEefFeedback};
+use crate::eef::{EefRuntimeProfile, EefState, SingleEefCommand, SingleEefFeedback};
 use crate::model::{ModelBackendKind, MountedEefType, Pose};
 use crate::request_service::RequestOutcome;
 use crate::warnings::WarningEvent;
@@ -25,6 +25,7 @@ pub struct WebSocketServerConfig {
     pub allow_control: bool,
     pub can_backend: CanWorkerBackend,
     pub model_backend: ModelBackendKind,
+    pub eef_profile: EefRuntimeProfile,
 }
 
 impl Default for WebSocketServerConfig {
@@ -35,6 +36,7 @@ impl Default for WebSocketServerConfig {
             allow_control: true,
             can_backend: CanWorkerBackend::AsyncFd,
             model_backend: ModelBackendKind::PlayAnalytical,
+            eef_profile: EefRuntimeProfile::Generic,
         }
     }
 }
@@ -160,6 +162,7 @@ pub async fn run_websocket_server(
         )
         .await?
     });
+    client.require_eef_profile(config.eef_profile)?;
 
     let listener = TcpListener::bind(&config.bind_addr).await?;
     info!(
@@ -168,6 +171,7 @@ pub async fn run_websocket_server(
         allow_control = config.allow_control,
         can_backend = ?config.can_backend,
         model_backend = ?config.model_backend,
+        eef_profile = config.eef_profile.label(),
         "AIRBOT Play websocket server listening"
     );
 
@@ -251,9 +255,7 @@ async fn handle_connection(
                                 }).await?;
                             }
                             ClientMessage::SubscribeEefFeedback => {
-                                eef_rx = client
-                                    .subscribe_e2_feedback()
-                                    .or_else(|| client.subscribe_g2_feedback());
+                                eef_rx = client.subscribe_eef_feedback();
                                 send_json(&mut ws, &ServerMessage::Ack {
                                     message: "subscribed to end-effector feedback".to_owned(),
                                 }).await?;
@@ -380,7 +382,7 @@ async fn handle_connection(
                                     }).await?;
                                     continue;
                                 }
-                                if let Err(err) = client.set_eef_state(state) {
+                                if let Err(err) = client.set_eef_state(state).await {
                                     send_json(&mut ws, &ServerMessage::Error {
                                         request_id: None,
                                         message: err.to_string(),
@@ -527,8 +529,9 @@ fn require_control(mode: AccessMode) -> Result<(), ClientError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ClientMessage, ServerMessage};
+    use super::{ClientMessage, ServerMessage, WebSocketServerConfig};
     use crate::client::{AccessMode, ConnectedRobotInfo};
+    use crate::eef::EefRuntimeProfile;
     use crate::model::{ModelBackendKind, MountedEefType, Pose};
 
     #[test]
@@ -596,5 +599,11 @@ mod tests {
             .expect_err("readonly mode should reject control");
         assert!(error.to_string().contains("control permission"));
         assert!(super::require_control(AccessMode::Control).is_ok());
+    }
+
+    #[test]
+    fn websocket_config_defaults_to_generic_eef_profile() {
+        let config = WebSocketServerConfig::default();
+        assert_eq!(config.eef_profile, EefRuntimeProfile::Generic);
     }
 }

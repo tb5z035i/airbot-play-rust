@@ -46,8 +46,9 @@ impl E2 {
         *self.state.read().expect("E2 state lock poisoned")
     }
 
-    pub fn set_state(&self, state: EefState) {
+    pub fn set_state(&self, state: EefState) -> Result<Vec<RawCanFrame>, E2Error> {
         *self.state.write().expect("E2 state lock poisoned") = state;
+        Ok(Vec::new())
     }
 
     pub fn latest_feedback(&self) -> Option<SingleEefFeedback> {
@@ -120,6 +121,14 @@ impl E2 {
             .map_err(|err| E2Error::Protocol(err.to_string()))
     }
 
+    pub fn build_feedback_poll_command(&self) -> Result<Vec<RawCanFrame>, E2Error> {
+        self.build_mit_command(&SingleEefCommand::default())
+    }
+
+    pub fn shutdown_frames(&self) -> Result<Vec<RawCanFrame>, E2Error> {
+        Ok(Vec::new())
+    }
+
     pub fn motor_to_eef(motor_pos: f64, motor_vel: f64, _motor_eff: f64) -> (f64, f64, f64) {
         (-motor_pos * POSITION_SCALE, motor_vel, 0.0)
     }
@@ -132,6 +141,7 @@ impl E2 {
 #[cfg(test)]
 mod tests {
     use super::E2;
+    use crate::eef::EefState;
 
     #[test]
     fn e2_transform_roundtrip() {
@@ -141,5 +151,40 @@ mod tests {
         assert!((eef.0 - 0.012).abs() < 1e-9);
         assert!((eef.1 - 0.4).abs() < 1e-9);
         assert_eq!(eef.2, 0.0);
+    }
+
+    #[test]
+    fn e2_state_changes_do_not_emit_frames() {
+        let e2 = E2::new(7);
+        let frames = e2
+            .set_state(EefState::Enabled)
+            .expect("state transition should succeed");
+
+        assert!(frames.is_empty());
+        assert_eq!(e2.state(), EefState::Enabled);
+    }
+
+    #[test]
+    fn e2_feedback_poll_requires_enabled_state() {
+        let e2 = E2::new(7);
+        let error = e2
+            .build_feedback_poll_command()
+            .expect_err("feedback polling should require enabled state");
+
+        assert!(matches!(error, super::E2Error::Disabled));
+    }
+
+    #[test]
+    fn e2_feedback_poll_builds_zero_mit_frames_when_enabled() {
+        let e2 = E2::new(7);
+        e2.set_state(EefState::Enabled)
+            .expect("state transition should succeed");
+
+        let frames = e2
+            .build_feedback_poll_command()
+            .expect("feedback poll frames should build");
+
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].can_id, 7);
     }
 }

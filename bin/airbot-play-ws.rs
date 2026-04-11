@@ -1,4 +1,5 @@
 use airbot_play_rust::can::worker::CanWorkerBackend;
+use airbot_play_rust::eef::EefRuntimeProfile;
 use airbot_play_rust::model::ModelBackendKind;
 use airbot_play_rust::transport::websocket::{WebSocketServerConfig, run_websocket_server};
 use clap::Parser;
@@ -24,21 +25,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt().init();
 
     let args = Args::parse();
-    run_websocket_server(WebSocketServerConfig {
+    run_websocket_server(build_config(args)).await?;
+
+    Ok(())
+}
+
+fn build_config(args: Args) -> WebSocketServerConfig {
+    WebSocketServerConfig {
         bind_addr: args.bind,
         interface: args.interface,
         allow_control: args.allow_control,
         can_backend: args.can_backend,
         model_backend: args.model_backend,
-    })
-    .await?;
-
-    Ok(())
+        eef_profile: EefRuntimeProfile::Generic,
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::Args;
+    use super::{Args, build_config};
+    use airbot_play_rust::eef::EefRuntimeProfile;
     use airbot_play_rust::model::ModelBackendKind;
     use clap::Parser;
 
@@ -54,5 +60,12 @@ mod tests {
         let args =
             Args::try_parse_from(["airbot-play-ws"]).expect("CLI should use default arguments");
         assert_eq!(args.model_backend, ModelBackendKind::PlayAnalytical);
+    }
+
+    #[test]
+    fn websocket_bin_uses_generic_eef_profile() {
+        let args = Args::try_parse_from(["airbot-play-ws"]).expect("CLI should parse defaults");
+        let config = build_config(args);
+        assert_eq!(config.eef_profile, EefRuntimeProfile::Generic);
     }
 }

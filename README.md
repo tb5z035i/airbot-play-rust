@@ -18,6 +18,10 @@ The main binaries are:
 
 - `airbot-play-ws`: WebSocket adapter for exposing the robot over a network
   interface
+- `airbot-play-e2-ws`: WebSocket adapter that validates the mounted end
+  effector is `E2B`
+- `airbot-play-g2-ws`: WebSocket adapter that validates the mounted end
+  effector is `G2`
 - `airbot-play-iceoryx2`: iceoryx2 adapter for shared-memory IPC
 - `airbot-play-probe`: probe connected AIRBOT instances and report board
   metadata
@@ -123,6 +127,13 @@ Build only the WebSocket adapter:
 cargo build --locked --bin airbot-play-ws
 ```
 
+Build the E2 or G2 specific WebSocket adapters:
+
+```bash
+cargo build --locked --bin airbot-play-e2-ws
+cargo build --locked --bin airbot-play-g2-ws
+```
+
 Build only the iceoryx2 adapter:
 
 ```bash
@@ -202,6 +213,24 @@ Start the WebSocket adapter:
 cargo run --bin airbot-play-ws -- --interface can0 --bind 127.0.0.1:9002
 ```
 
+Start the E2-specific WebSocket adapter:
+
+```bash
+cargo run --bin airbot-play-e2-ws -- --interface can0 --bind 127.0.0.1:9002
+```
+
+Start the G2-specific WebSocket adapter:
+
+```bash
+cargo run --bin airbot-play-g2-ws -- --interface can0 --bind 127.0.0.1:9002
+```
+
+`E2` is exposed through the existing `MountedEefType::E2B` model path in the
+crate, so the E2 wrapper validates against `E2B`.
+
+The `airbot-play-e2-ws` and `airbot-play-g2-ws` entrypoints are EEF-only
+servers. They do not bootstrap or enable the arm motors.
+
 Start the iceoryx2 adapter:
 
 ```bash
@@ -234,6 +263,34 @@ Decode a recorded `candump` log:
 ```bash
 cargo run --bin airbot-can-diag -- --input /path/to/candump.log
 ```
+
+Run the websocket keyboard EEF test UI:
+
+```bash
+uv run scripts/airbot_play_eef_ws_keyboard.py --url ws://127.0.0.1:9002
+```
+
+Spawn the G2 wrapper and control open/close from the keyboard:
+
+```bash
+uv run scripts/airbot_play_eef_ws_keyboard.py --spawn-server --server-kind g2 --interface can0
+```
+
+Spawn the E2 wrapper and monitor the current value:
+
+```bash
+uv run scripts/airbot_play_eef_ws_keyboard.py --spawn-server --server-kind e2 --interface can0
+```
+
+In the keyboard UI, `e` enables the end effector, `x` disables it, and for G2
+the `o` / `c` keys move the gripper open and closed using G2 MIT commands.
+
+For G2, the runtime keeps replaying the latest MIT target at a fixed rate after
+you send it, so host-side control remains active even when you are not pressing
+keys continuously.
+
+For E2B hardware, press `e` after connecting. The server keeps feedback flowing
+by continuously issuing zero-value E2 MIT commands while the EEF is enabled.
 
 ## Dependency Discovery
 

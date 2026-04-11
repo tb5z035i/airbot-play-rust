@@ -3,7 +3,10 @@ use crate::can::router::CanFrameRouter;
 use crate::can::worker::{
     CanTxPriority, CanWorker, CanWorkerBackend, CanWorkerConfig, CanWorkerError,
 };
-use crate::eef::{E2, EefState, G2, SingleEefCommand, SingleEefFeedback};
+use crate::eef::{
+    EefRuntime, EefRuntimeError, EefRuntimeProfile, EefState, SingleEefCommand,
+    SingleEefFeedback, spawn_eef_runtime_task as spawn_shared_eef_runtime_task,
+};
 use crate::model::urdf::{
     GravityCoefficientIssue, format_gravity_coefficients, sanitize_gravity_coefficients,
 };
@@ -63,6 +66,8 @@ pub enum ClientError {
     Motor(#[from] MotorRuntimeError),
     #[error("arm runtime error: {0}")]
     Arm(#[from] PlayArmError),
+    #[error("end-effector runtime error: {0}")]
+    Eef(#[from] EefRuntimeError),
     #[error("model error: {0}")]
     Model(#[from] ModelError),
     #[error("unsupported request target `{0:?}`")]
@@ -75,8 +80,7 @@ pub struct AirbotPlayClient {
     worker: Arc<CanWorker>,
     frame_router: Arc<CanFrameRouter>,
     arm: Arc<PlayArm>,
-    e2: Arc<E2>,
-    g2: Arc<G2>,
+    eef: Arc<EefRuntime>,
     warning_bus: WarningBus,
     eef_task: Mutex<Option<JoinHandle<()>>>,
 }
@@ -173,18 +177,15 @@ impl AirbotPlayClient {
             ..CanWorkerConfig::default()
         })?;
         let bootstrap = PlayArm::bootstrap(worker.as_ref()).await?;
+        let mounted_eef = bootstrap.mounted_eef.clone();
 
-        let control_model = ModelRegistry::load(model_backend, bootstrap.mounted_eef.clone())?;
-        let ik_model = ModelRegistry::load(model_backend, bootstrap.mounted_eef.clone())?;
+        let control_model = ModelRegistry::load(model_backend, mounted_eef.clone())?;
+        let ik_model = ModelRegistry::load(model_backend, mounted_eef.clone())?;
         let warning_bus = WarningBus::default();
         let (frame_router, mut routes) = CanFrameRouter::new(
             Arc::clone(&worker),
             1_u16..=6_u16,
-            matches!(
-                bootstrap.mounted_eef,
-                MountedEefType::E2B | MountedEefType::G2
-            )
-            .then_some(7),
+            matches!(&mounted_eef, MountedEefType::E2B | MountedEefType::G2).then_some(7),
         );
         let motors = (1_u16..=3)
             .map(|id| {
@@ -217,7 +218,7 @@ impl AirbotPlayClient {
 
         let arm = Arc::new(PlayArm::new(
             interface.clone(),
-            bootstrap.mounted_eef.clone(),
+            mounted_eef.clone(),
             control_model,
             ik_model,
             Arc::clone(&worker),
@@ -227,17 +228,17 @@ impl AirbotPlayClient {
         arm.set_gravity_coefficients(bootstrap.gravity_coefficients);
         let gravity_coefficients = arm.gravity_coefficients();
 
-        let e2 = Arc::new(E2::new(7));
-        let g2 = Arc::new(G2::new(7));
+        let eef = Arc::new(EefRuntime::new(mounted_eef.clone()));
         arm.start(routes.arm_rx)?;
 
-        let eef_task = spawn_eef_dispatcher(routes.eef_rx, Arc::clone(&e2), Arc::clone(&g2));
+        let eef_task =
+            spawn_shared_eef_runtime_task(routes.eef_rx, Arc::clone(&eef), Arc::clone(&worker));
 
         Ok(Self {
             info: ConnectedRobotInfo {
                 interface,
                 access_mode,
-                mounted_eef: bootstrap.mounted_eef,
+                mounted_eef,
                 model_backend,
                 gravity_coefficients,
             },
@@ -245,8 +246,7 @@ impl AirbotPlayClient {
             worker,
             frame_router,
             arm,
-            e2,
-            g2,
+            eef,
             warning_bus,
             eef_task: Mutex::new(Some(eef_task)),
         })
@@ -264,6 +264,10 @@ impl AirbotPlayClient {
         &self.arm
     }
 
+    pub fn eef(&self) -> &Arc<EefRuntime> {
+        &self.eef
+    }
+
     pub fn mounted_eef(&self) -> &MountedEefType {
         &self.info.mounted_eef
     }
@@ -276,12 +280,20 @@ impl AirbotPlayClient {
         self.warning_bus.subscribe()
     }
 
+    pub fn subscribe_eef_feedback(&self) -> Option<broadcast::Receiver<SingleEefFeedback>> {
+        self.eef.subscribe_feedback()
+    }
+
     pub fn subscribe_e2_feedback(&self) -> Option<broadcast::Receiver<SingleEefFeedback>> {
-        matches!(self.info.mounted_eef, MountedEefType::E2B).then(|| self.e2.subscribe_feedback())
+        matches!(self.info.mounted_eef, MountedEefType::E2B)
+            .then(|| self.eef.subscribe_feedback())
+            .flatten()
     }
 
     pub fn subscribe_g2_feedback(&self) -> Option<broadcast::Receiver<SingleEefFeedback>> {
-        matches!(self.info.mounted_eef, MountedEefType::G2).then(|| self.g2.subscribe_feedback())
+        matches!(self.info.mounted_eef, MountedEefType::G2)
+            .then(|| self.eef.subscribe_feedback())
+            .flatten()
     }
 
     pub async fn query_param(
@@ -420,6 +432,11 @@ impl AirbotPlayClient {
         Ok(self.arm.current_pose()?)
     }
 
+    pub fn require_eef_profile(&self, profile: EefRuntimeProfile) -> Result<(), ClientError> {
+        self.eef.validate_profile(profile)?;
+        Ok(())
+    }
+
     pub async fn set_arm_state(&self, state: ArmState) -> Result<(), ClientError> {
         self.require_control()?;
         self.arm.set_state(state).await?;
@@ -436,12 +453,11 @@ impl AirbotPlayClient {
         Ok(self.arm.submit_task_target(pose)?)
     }
 
-    pub fn set_eef_state(&self, state: EefState) -> Result<(), ClientError> {
+    pub async fn set_eef_state(&self, state: EefState) -> Result<(), ClientError> {
         self.require_control()?;
-        match self.info.mounted_eef {
-            MountedEefType::E2B => self.e2.set_state(state),
-            MountedEefType::G2 => self.g2.set_state(state),
-            _ => {}
+        let frames = self.eef.set_state(state)?;
+        if !frames.is_empty() {
+            self.send_frames(&frames).await?;
         }
         Ok(())
     }
@@ -451,10 +467,7 @@ impl AirbotPlayClient {
         command: &SingleEefCommand,
     ) -> Result<Vec<RawCanFrame>, ClientError> {
         self.require_control()?;
-        let frames = self
-            .e2
-            .build_mit_command(command)
-            .map_err(|err| ClientError::Model(ModelError::Backend(err.to_string())))?;
+        let frames = self.eef.build_e2_command(command)?;
         self.send_frames(&frames).await?;
         Ok(frames)
     }
@@ -464,11 +477,11 @@ impl AirbotPlayClient {
         command: &SingleEefCommand,
     ) -> Result<Vec<RawCanFrame>, ClientError> {
         self.require_control()?;
-        let frames = self
-            .g2
-            .build_mit_command(command)
-            .map_err(|err| ClientError::Model(ModelError::Backend(err.to_string())))?;
-        self.send_frames(&frames).await?;
+        self.eef.submit_g2_mit_target(command)?;
+        let frames = self.eef.realtime_control_frames()?.unwrap_or_default();
+        if !frames.is_empty() {
+            self.send_frames(&frames).await?;
+        }
         Ok(frames)
     }
 
@@ -477,10 +490,7 @@ impl AirbotPlayClient {
         command: &SingleEefCommand,
     ) -> Result<Vec<RawCanFrame>, ClientError> {
         self.require_control()?;
-        let frames = self
-            .g2
-            .build_pvt_command(command)
-            .map_err(|err| ClientError::Model(ModelError::Backend(err.to_string())))?;
+        let frames = self.eef.build_g2_pvt_command(command)?;
         self.send_frames(&frames).await?;
         Ok(frames)
     }
@@ -488,7 +498,8 @@ impl AirbotPlayClient {
     pub async fn shutdown_gracefully(&self) -> Result<(), ClientError> {
         self.arm.stop();
 
-        let disable_frames = build_shutdown_disable_frames()?;
+        let mut disable_frames = build_shutdown_disable_frames()?;
+        disable_frames.extend(self.eef.shutdown_frames()?);
         if !disable_frames.is_empty() {
             self.worker
                 .send_frames(CanTxPriority::Lifecycle, disable_frames)
@@ -539,22 +550,6 @@ impl Drop for AirbotPlayClient {
             task.abort();
         }
     }
-}
-
-fn spawn_eef_dispatcher(
-    mut eef_rx: Option<tokio::sync::mpsc::Receiver<RawCanFrame>>,
-    e2: Arc<E2>,
-    g2: Arc<G2>,
-) -> JoinHandle<()> {
-    tokio::spawn(async move {
-        let Some(ref mut frames_rx) = eef_rx else {
-            return;
-        };
-        while let Some(frame) = frames_rx.recv().await {
-            e2.handle_raw_frame(&frame);
-            g2.handle_raw_frame(&frame);
-        }
-    })
 }
 
 fn build_shutdown_disable_frames() -> Result<Vec<RawCanFrame>, ClientError> {

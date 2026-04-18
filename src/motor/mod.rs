@@ -618,7 +618,10 @@ mod tests {
     fn od_runtime_seeds_initial_state_from_param_responses() {
         let mut actor = od_actor(1);
 
-        actor.handle_raw_frame(&od_param_response_frame(1, 0xE1, 1.5));
+        // The OD position register (0xE1) is reported in degrees by the
+        // firmware; the parser must convert it to radians before it is
+        // used as feedback. 90 degrees should become PI/2 radians.
+        actor.handle_raw_frame(&od_param_response_frame(1, 0xE1, 90.0));
         actor.handle_raw_frame(&od_param_response_frame(1, 0xE2, -0.25));
         actor.handle_raw_frame(&od_param_response_frame(1, 0xE3, 0.75));
 
@@ -626,12 +629,12 @@ mod tests {
             .snapshot
             .state
             .expect("OD runtime should seed initial state");
-        assert!((state.pos - 1.5).abs() < 1e-6);
+        assert!((state.pos - std::f64::consts::FRAC_PI_2).abs() < 1e-6);
         assert!((state.vel + 0.25).abs() < 1e-6);
         assert!((state.eff - 0.75).abs() < 1e-6);
         assert_eq!(
             actor.snapshot.params.get("position"),
-            Some(&ParamValue::F32(1.5))
+            Some(&ParamValue::F32(std::f32::consts::FRAC_PI_2))
         );
         assert_eq!(
             actor.snapshot.params.get("velocity"),

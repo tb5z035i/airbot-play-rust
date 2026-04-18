@@ -4,8 +4,8 @@ use crate::can::worker::{
     CanTxPriority, CanWorker, CanWorkerBackend, CanWorkerConfig, CanWorkerError,
 };
 use crate::eef::{
-    EefRuntime, EefRuntimeError, EefRuntimeProfile, EefState, SingleEefCommand,
-    SingleEefFeedback, spawn_eef_runtime_task as spawn_shared_eef_runtime_task,
+    EefRuntime, EefRuntimeError, EefRuntimeProfile, EefState, SingleEefCommand, SingleEefFeedback,
+    spawn_eef_runtime_task as spawn_shared_eef_runtime_task,
 };
 use crate::model::urdf::{
     GravityCoefficientIssue, format_gravity_coefficients, sanitize_gravity_coefficients,

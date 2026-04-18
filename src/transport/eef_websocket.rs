@@ -1,8 +1,6 @@
 use crate::can::worker::CanWorkerBackend;
 use crate::client::{AccessMode, ClientError, ConnectedRobotInfo};
-use crate::eef::{
-    EefClient, EefRuntimeProfile, EefState, SingleEefCommand, SingleEefFeedback,
-};
+use crate::eef::{EefClient, EefRuntimeProfile, EefState, SingleEefCommand, SingleEefFeedback};
 use crate::model::ModelBackendKind;
 use crate::warnings::WarningEvent;
 use futures_util::{Sink, SinkExt, StreamExt};
@@ -42,20 +40,12 @@ pub enum EefWebSocketServerError {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ClientMessage {
-    Hello {
-        access_mode: AccessMode,
-    },
+    Hello { access_mode: AccessMode },
     SubscribeWarnings,
     SubscribeEefFeedback,
-    SetEefState {
-        state: EefState,
-    },
-    SubmitE2Command {
-        command: SingleEefCommand,
-    },
-    SubmitG2MitCommand {
-        command: SingleEefCommand,
-    },
+    SetEefState { state: EefState },
+    SubmitE2Command { command: SingleEefCommand },
+    SubmitG2MitCommand { command: SingleEefCommand },
 }
 
 #[derive(Debug, Serialize)]

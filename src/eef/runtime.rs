@@ -157,10 +157,7 @@ impl EefRuntime {
         }
     }
 
-    pub fn submit_g2_mit_target(
-        &self,
-        command: &SingleEefCommand,
-    ) -> Result<(), EefRuntimeError> {
+    pub fn submit_g2_mit_target(&self, command: &SingleEefCommand) -> Result<(), EefRuntimeError> {
         match &self.inner {
             EefRuntimeInner::None => Err(self.unsupported_mounted_eef()),
             EefRuntimeInner::E2(_) => Err(self.unsupported_command("G2 MIT")),

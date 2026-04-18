@@ -10,6 +10,17 @@ use crate::types::{
 use std::collections::BTreeMap;
 use std::f32::consts::PI;
 
+/// Apply the OD-motor-specific "from raw" conversion that the C++ reference
+/// driver (`od_motor.cpp`) attaches to each `ParamBuilder`. For the
+/// `position` register (0xE1) this converts the raw degrees value reported
+/// by the firmware into the radians used by every other code path.
+fn convert_param_from_raw(name: &str, value: ParamValue) -> ParamValue {
+    match (name, value) {
+        ("position", ParamValue::F32(degrees)) => ParamValue::F32(degrees * PI / 180.0),
+        (_, value) => value,
+    }
+}
+
 const PARAM_GET_ARB_ID_BIAS: u32 = 0x000;
 const PARAM_SET_ARB_ID_BIAS: u32 = 0x080;
 const PARAM_RET_ARB_ID_BIAS: u32 = 0x100;
@@ -292,6 +303,7 @@ impl MotorProtocol for OdProtocol {
                 .unwrap_or_else(|| format!("param_{param_id:02X}"));
             let value = param_by_id(PARAMS, param_id)
                 .and_then(|definition| deserialize_param(definition, bytes).ok())
+                .map(|value| convert_param_from_raw(&name, value))
                 .unwrap_or(ParamValue::Raw4(bytes));
             let mut values = BTreeMap::new();
             values.insert(name, value);
@@ -330,7 +342,9 @@ impl MotorProtocol for OdProtocol {
                     return None;
                 }
 
-                let value = deserialize_param(definition, bytes).unwrap_or(ParamValue::Raw4(bytes));
+                let value = deserialize_param(definition, bytes)
+                    .map(|value| convert_param_from_raw(&name, value))
+                    .unwrap_or(ParamValue::Raw4(bytes));
                 let mut values = BTreeMap::new();
                 values.insert(name, value);
                 return Some(DecodedFrame::ParamResponse {

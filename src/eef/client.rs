@@ -4,9 +4,7 @@ use super::{
 };
 use crate::arm::PlayArm;
 use crate::can::router::CanFrameRouter;
-use crate::can::worker::{
-    CanTxPriority, CanWorker, CanWorkerBackend, CanWorkerConfig,
-};
+use crate::can::worker::{CanTxPriority, CanWorker, CanWorkerBackend, CanWorkerConfig};
 use crate::client::{AccessMode, ClientError, ConnectedRobotInfo};
 use crate::model::{ModelBackendKind, ModelError, MountedEefType};
 use crate::warning_bus::WarningBus;
@@ -84,7 +82,8 @@ impl EefClient {
         frame_router
             .start()
             .map_err(|err| ClientError::Model(ModelError::Backend(err.to_string())))?;
-        let runtime_task = spawn_eef_runtime_task(routes.eef_rx, Arc::clone(&eef), Arc::clone(&worker));
+        let runtime_task =
+            spawn_eef_runtime_task(routes.eef_rx, Arc::clone(&eef), Arc::clone(&worker));
 
         Ok(Self {
             info: ConnectedRobotInfo {
@@ -129,7 +128,9 @@ impl EefClient {
         self.require_control()?;
         let frames = self.eef.build_e2_command(command)?;
         if !frames.is_empty() {
-            self.worker.send_frames(CanTxPriority::Control, frames).await?;
+            self.worker
+                .send_frames(CanTxPriority::Control, frames)
+                .await?;
         }
         Ok(())
     }

@@ -302,8 +302,8 @@ impl G2 {
 mod tests {
     use super::G2;
     use crate::eef::EefState;
-    use crate::protocol::motor::dm::DmProtocol;
     use crate::protocol::motor::MotorProtocol;
+    use crate::protocol::motor::dm::DmProtocol;
     use crate::types::{MotorState, ParamValue};
 
     #[test]

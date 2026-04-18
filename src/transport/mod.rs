@@ -1,6 +1,6 @@
+pub mod eef_websocket;
 #[cfg(feature = "iceoryx2-transport")]
 pub mod iceoryx2;
-pub mod eef_websocket;
 pub mod websocket;
 
 pub use eef_websocket::{

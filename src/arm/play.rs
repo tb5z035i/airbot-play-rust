@@ -33,6 +33,15 @@ const FEEDBACK_TIMEOUT: Duration = Duration::from_millis(100);
 const STALE_COMMAND_THRESHOLD: Duration = Duration::from_millis(250);
 const FOLLOWING_KP: [f64; ARM_DOF] = [200.0, 200.0, 200.0, 50.0, 50.0, 50.0];
 const FOLLOWING_KD: [f64; ARM_DOF] = [3.0, 3.0, 3.0, 1.0, 1.0, 1.0];
+/// Hard per-tick safety bound on the per-joint delta between the
+/// commanded target and the current feedback position while in
+/// `CommandFollowing`. Any oversized request is clamped to within this
+/// many radians of the present joint angle so an upstream glitch (a
+/// stale snapshot from teleop, a corrupted IK seed, etc.) cannot snap
+/// the arm. Tuned to be loose enough not to interfere with normal
+/// teleop ramps and aggressive intentional motions, but tight enough
+/// to catch obvious outliers; revisit if real motion gets clipped.
+const MAX_COMMAND_JOINT_DELTA_RAD: f64 = std::f64::consts::PI / 36.0;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -368,10 +377,26 @@ impl PlayArm {
             return Err(PlayArmError::InvalidControlState);
         }
 
-        let seed = self
-            .latest_feedback()
-            .map(|feedback| feedback.positions.to_vec());
-        let seed = seed.as_deref();
+        // Seed the analytical IK from the *previously-submitted* joint
+        // target (kept in `command_slot`), falling back to the live
+        // feedback only when no prior target exists. The analytical IK
+        // chooses among multiple closed-form solutions by weighted
+        // distance from the seed (`calculate_bias_punish`); using the
+        // live feedback closes a positive-feedback loop with the joint
+        // controller (small feedback drift -> different IK branch ->
+        // arm jerks toward it -> more feedback drift), which manifests
+        // as visible oscillation when the cartesian pose target is
+        // near-static. The previous target is stable for a stable pose
+        // and so picks the same branch every cycle.
+        // `seed_command_target_from_feedback` populates `command_slot`
+        // when entering `CommandFollowing`, so the first call after
+        // enabling still seeds from current feedback as before.
+        let seed_storage = self
+            .command_slot
+            .latest()
+            .map(|snapshot| snapshot.target.positions.to_vec())
+            .or_else(|| self.latest_feedback().map(|fb| fb.positions.to_vec()));
+        let seed = seed_storage.as_deref();
         let joints = self.ik_model.inverse_kinematics(pose, seed)?;
         let target = JointTarget::from_slice(&joints)
             .map_err(|err| PlayArmError::Model(ModelError::Backend(err.to_string())))?;
@@ -604,12 +629,14 @@ impl PlayArm {
             .command_slot
             .latest()
             .ok_or(PlayArmError::MissingFeedback)?;
-        let target_positions = if target.age > STALE_COMMAND_THRESHOLD {
+        let raw_target_positions = if target.age > STALE_COMMAND_THRESHOLD {
             self.maybe_publish_stale_command_warning(target.age);
             feedback.positions
         } else {
             target.target.positions
         };
+        let target_positions =
+            clamp_target_to_max_joint_delta(&raw_target_positions, &feedback.positions);
 
         self.encode_mit_commands((0..ARM_DOF).map(|index| MotorCommand {
             pos: target_positions[index],
@@ -759,6 +786,22 @@ fn extract_u32(outcome: &RequestOutcome) -> Option<u32> {
         })
 }
 
+/// Clamp each element of `target` to within `MAX_COMMAND_JOINT_DELTA_RAD`
+/// of the corresponding element of `feedback`. Returns a fresh array;
+/// elements already within range are passed through untouched.
+fn clamp_target_to_max_joint_delta(
+    target: &[f64; ARM_DOF],
+    feedback: &[f64; ARM_DOF],
+) -> [f64; ARM_DOF] {
+    let mut clamped = *feedback;
+    for index in 0..ARM_DOF {
+        let delta = (target[index] - feedback[index])
+            .clamp(-MAX_COMMAND_JOINT_DELTA_RAD, MAX_COMMAND_JOINT_DELTA_RAD);
+        clamped[index] = feedback[index] + delta;
+    }
+    clamped
+}
+
 fn extract_gravity_coefficients(outcome: &RequestOutcome) -> Option<BTreeMap<String, [f64; 6]>> {
     let values = outcome
         .decoded_frames
@@ -792,7 +835,8 @@ fn extract_gravity_coefficients(outcome: &RequestOutcome) -> Option<BTreeMap<Str
 #[cfg(test)]
 mod tests {
     use super::{
-        ArmBootstrapInfo, ArmJointFeedback, ArmState, PlayArm, extract_gravity_coefficients,
+        ArmBootstrapInfo, ArmJointFeedback, ArmState, MAX_COMMAND_JOINT_DELTA_RAD, PlayArm,
+        clamp_target_to_max_joint_delta, extract_gravity_coefficients,
     };
     use crate::arm::command_slot::JointTarget;
     use crate::can::worker::CanWorker;
@@ -1112,5 +1156,61 @@ mod tests {
             gravity_coefficients: [0.6, 0.6, 0.6, 1.0, 1.0, 1.0],
         };
         assert_eq!(info.gravity_coefficients[0], 0.6);
+    }
+
+    #[test]
+    fn clamp_target_to_max_joint_delta_passes_small_deltas_through() {
+        let feedback = [0.1, -0.2, 0.3, 0.0, 0.0, 0.0];
+        let small_step = MAX_COMMAND_JOINT_DELTA_RAD * 0.5;
+        let target = [
+            feedback[0] + small_step,
+            feedback[1] - small_step,
+            feedback[2],
+            feedback[3] + small_step,
+            feedback[4] - small_step,
+            feedback[5],
+        ];
+        let clamped = clamp_target_to_max_joint_delta(&target, &feedback);
+        assert_eq!(clamped, target);
+    }
+
+    #[test]
+    fn clamp_target_to_max_joint_delta_caps_oversized_deltas_per_joint() {
+        let feedback = [0.0; 6];
+        let target = [
+            MAX_COMMAND_JOINT_DELTA_RAD * 4.0,
+            -MAX_COMMAND_JOINT_DELTA_RAD * 4.0,
+            0.0,
+            MAX_COMMAND_JOINT_DELTA_RAD,
+            -MAX_COMMAND_JOINT_DELTA_RAD,
+            MAX_COMMAND_JOINT_DELTA_RAD * 0.5,
+        ];
+        let clamped = clamp_target_to_max_joint_delta(&target, &feedback);
+        // Joints 0/1 saturate at +/- MAX_COMMAND_JOINT_DELTA_RAD; 2 stays
+        // at zero; 3/4 are exactly at the bound and unchanged; 5 is
+        // within bound and unchanged.
+        assert!((clamped[0] - MAX_COMMAND_JOINT_DELTA_RAD).abs() < 1e-12);
+        assert!((clamped[1] + MAX_COMMAND_JOINT_DELTA_RAD).abs() < 1e-12);
+        assert_eq!(clamped[2], 0.0);
+        assert!((clamped[3] - MAX_COMMAND_JOINT_DELTA_RAD).abs() < 1e-12);
+        assert!((clamped[4] + MAX_COMMAND_JOINT_DELTA_RAD).abs() < 1e-12);
+        assert!((clamped[5] - MAX_COMMAND_JOINT_DELTA_RAD * 0.5).abs() < 1e-12);
+    }
+
+    #[test]
+    fn clamp_target_to_max_joint_delta_works_at_nonzero_feedback() {
+        let feedback = [1.0, -0.5, 0.25, -1.5, 0.0, 0.75];
+        let target = [
+            1.0 + MAX_COMMAND_JOINT_DELTA_RAD * 10.0,
+            -0.5 - MAX_COMMAND_JOINT_DELTA_RAD * 10.0,
+            0.25,
+            -1.5,
+            0.0,
+            0.75,
+        ];
+        let clamped = clamp_target_to_max_joint_delta(&target, &feedback);
+        assert!((clamped[0] - (1.0 + MAX_COMMAND_JOINT_DELTA_RAD)).abs() < 1e-12);
+        assert!((clamped[1] - (-0.5 - MAX_COMMAND_JOINT_DELTA_RAD)).abs() < 1e-12);
+        assert_eq!(&clamped[2..], &feedback[2..]);
     }
 }

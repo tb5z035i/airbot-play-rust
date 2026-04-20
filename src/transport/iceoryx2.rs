@@ -526,6 +526,7 @@ fn drain_request_payloads(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn process_request<C>(
     event_sink: &EventSink<'_>,
     client: &Arc<C>,
@@ -715,6 +716,9 @@ async fn shutdown_signal() -> Result<(), std::io::Error> {
 
 #[cfg(test)]
 mod tests {
+    // `test_guard()` holds a process-wide mutex for the whole test body, including `.await` points.
+    #![allow(clippy::await_holding_lock)]
+
     use super::*;
     use crate::request_service::RequestOutcome;
     use crate::warnings::WarningKind;

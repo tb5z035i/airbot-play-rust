@@ -620,12 +620,15 @@ fn extract_gravity_coefficients(outcome: &RequestOutcome) -> Option<BTreeMap<Str
     Some(by_eef)
 }
 
-fn sanitize_gravity_coefficients_by_eef(
-    coefficients_by_eef: BTreeMap<String, [f64; 6]>,
-) -> (
-    BTreeMap<String, [f64; 6]>,
+type GravityCoefficientsByEef = BTreeMap<String, [f64; 6]>;
+type GravityCoefficientSanitizationResult = (
+    GravityCoefficientsByEef,
     Vec<(String, GravityCoefficientIssue)>,
-) {
+);
+
+fn sanitize_gravity_coefficients_by_eef(
+    coefficients_by_eef: GravityCoefficientsByEef,
+) -> GravityCoefficientSanitizationResult {
     let mut sanitized = BTreeMap::new();
     let mut issues = Vec::new();
     for (eef_label, coefficients) in coefficients_by_eef {

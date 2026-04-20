@@ -77,14 +77,12 @@ fn main() {
         dependency_lib_dir.display()
     );
     println!(
-        "cargo:rustc-link-lib={}={}",
-        link_mode.rustc_link_kind(),
-        "pinocchio_parsers"
+        "cargo:rustc-link-lib={}=pinocchio_parsers",
+        link_mode.rustc_link_kind()
     );
     println!(
-        "cargo:rustc-link-lib={}={}",
-        link_mode.rustc_link_kind(),
-        "pinocchio_default"
+        "cargo:rustc-link-lib={}=pinocchio_default",
+        link_mode.rustc_link_kind()
     );
     println!("cargo:rustc-link-lib=dylib=boost_filesystem");
     println!("cargo:rustc-link-lib=dylib=boost_serialization");

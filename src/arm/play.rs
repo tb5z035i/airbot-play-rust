@@ -1,4 +1,4 @@
-use super::command_slot::{ARM_DOF, CommandSlot, JointTarget};
+use super::command_slot::{ARM_DOF, CommandSlot, CommandSource, JointTarget};
 use crate::can::realtime::{configure_sched_fifo, lock_memory, set_current_thread_affinity};
 use crate::can::worker::{CanTxPriority, CanWorker, CanWorkerError};
 use crate::model::urdf::{format_gravity_coefficients, sanitize_gravity_coefficients};
@@ -31,17 +31,26 @@ const CONTROL_HZ: u64 = 250;
 const CONTROL_PERIOD: Duration = Duration::from_millis(1000 / CONTROL_HZ);
 const FEEDBACK_TIMEOUT: Duration = Duration::from_millis(100);
 const STALE_COMMAND_THRESHOLD: Duration = Duration::from_millis(250);
-const FOLLOWING_KP: [f64; ARM_DOF] = [200.0, 200.0, 200.0, 50.0, 50.0, 50.0];
+const FOLLOWING_KP: [f64; ARM_DOF] = [100.0, 100.0, 100.0, 20.0, 20.0, 20.0];
 const FOLLOWING_KD: [f64; ARM_DOF] = [3.0, 3.0, 3.0, 1.0, 1.0, 1.0];
-/// Hard per-tick safety bound on the per-joint delta between the
-/// commanded target and the current feedback position while in
-/// `CommandFollowing`. Any oversized request is clamped to within this
-/// many radians of the present joint angle so an upstream glitch (a
-/// stale snapshot from teleop, a corrupted IK seed, etc.) cannot snap
-/// the arm. Tuned to be loose enough not to interfere with normal
-/// teleop ramps and aggressive intentional motions, but tight enough
-/// to catch obvious outliers; revisit if real motion gets clipped.
-const MAX_COMMAND_JOINT_DELTA_RAD: f64 = std::f64::consts::PI / 36.0;
+/// Hard per-tick safety bound on the per-joint delta between an
+/// IK-derived commanded target and the current feedback position while
+/// in `CommandFollowing`. Inverse kinematics on a cartesian pose can
+/// branch-switch (the analytical solver picks among multiple closed-form
+/// solutions), produce large jumps from infeasible / near-singular pose
+/// inputs, or otherwise yield joint vectors that are far from the live
+/// feedback even when the cartesian input itself moved only a little.
+/// Clamping to within this many radians of the present joint angle
+/// stops a single bad IK output from snapping the arm.
+///
+/// This bound is **only applied to IK-derived targets**
+/// (`submit_task_target`). Direct joint targets (`submit_joint_target`,
+/// encoded as MIT commands downstream) are passed through unclamped:
+/// upstream callers like teleop leader-follower mapping or scripted
+/// joint moves are responsible for their own trajectory shaping, and
+/// must be able to issue intentional aggressive motion without the
+/// control layer second-guessing them.
+const MAX_COMMAND_JOINT_DELTA_RAD: f64 = std::f64::consts::PI / 24.0;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -315,7 +324,15 @@ impl PlayArm {
 
     fn seed_command_target_from_feedback(&self) {
         if let Some(feedback) = self.latest_feedback() {
-            self.command_slot.set(JointTarget::new(feedback.positions));
+            // Tagged as `DirectJoint` because the seed is the live
+            // feedback itself: the per-tick clamp is a no-op here
+            // (delta == 0) regardless of source, but the truthful tag
+            // is "this came from a known-safe joint vector, not from
+            // IK", so we don't want a stale-IK-style clamp to apply.
+            self.command_slot.set(
+                JointTarget::new(feedback.positions),
+                CommandSource::DirectJoint,
+            );
         } else {
             self.command_slot.clear();
         }
@@ -368,7 +385,8 @@ impl PlayArm {
         }
 
         let target = JointTarget::new(positions);
-        self.command_slot.set(target.clone());
+        self.command_slot
+            .set(target.clone(), CommandSource::DirectJoint);
         Ok(target)
     }
 
@@ -400,7 +418,8 @@ impl PlayArm {
         let joints = self.ik_model.inverse_kinematics(pose, seed)?;
         let target = JointTarget::from_slice(&joints)
             .map_err(|err| PlayArmError::Model(ModelError::Backend(err.to_string())))?;
-        self.command_slot.set(target.clone());
+        self.command_slot
+            .set(target.clone(), CommandSource::InverseKinematics);
         Ok(target)
     }
 
@@ -629,14 +648,25 @@ impl PlayArm {
             .command_slot
             .latest()
             .ok_or(PlayArmError::MissingFeedback)?;
-        let raw_target_positions = if target.age > STALE_COMMAND_THRESHOLD {
+        // The stale-command branch substitutes feedback positions, which
+        // is by construction zero-delta from feedback — clamping it
+        // would be a no-op — so we only ever need to clamp a *fresh*
+        // target, and only when that fresh target came from inverse
+        // kinematics. Direct joint commands (encoded as MIT downstream)
+        // are passed through unchanged so upstream teleop / scripted
+        // moves can issue intentional aggressive motion without the
+        // control layer second-guessing them.
+        let target_positions = if target.age > STALE_COMMAND_THRESHOLD {
             self.maybe_publish_stale_command_warning(target.age);
             feedback.positions
         } else {
-            target.target.positions
+            match target.source {
+                CommandSource::InverseKinematics => {
+                    clamp_target_to_max_joint_delta(&target.target.positions, &feedback.positions)
+                }
+                CommandSource::DirectJoint => target.target.positions,
+            }
         };
-        let target_positions =
-            clamp_target_to_max_joint_delta(&raw_target_positions, &feedback.positions);
 
         self.encode_mit_commands((0..ARM_DOF).map(|index| MotorCommand {
             pos: target_positions[index],
@@ -789,6 +819,9 @@ fn extract_u32(outcome: &RequestOutcome) -> Option<u32> {
 /// Clamp each element of `target` to within `MAX_COMMAND_JOINT_DELTA_RAD`
 /// of the corresponding element of `feedback`. Returns a fresh array;
 /// elements already within range are passed through untouched.
+///
+/// This is only invoked on IK-derived targets — see the comment on
+/// `MAX_COMMAND_JOINT_DELTA_RAD` for the rationale.
 fn clamp_target_to_max_joint_delta(
     target: &[f64; ARM_DOF],
     feedback: &[f64; ARM_DOF],
@@ -1061,6 +1094,97 @@ mod tests {
             .expect("command-following frames should build");
 
         assert_positions_close(decode_command_positions(&frames), feedback.positions);
+    }
+
+    #[tokio::test]
+    async fn direct_joint_targets_bypass_max_joint_delta_clamp() {
+        // `submit_joint_target` is the upstream-trusted MIT-command path:
+        // intentional aggressive joint moves (e.g. teleop leader-follower
+        // mapping) must reach the motors verbatim. A target several times
+        // larger than `MAX_COMMAND_JOINT_DELTA_RAD` away from feedback
+        // should be sent through unchanged.
+        let Some(arm) = arm() else {
+            return;
+        };
+        let feedback = ArmJointFeedback {
+            positions: [0.0; 6],
+            velocities: [0.0; 6],
+            torques: [0.0; 6],
+            valid: true,
+            timestamp_millis: 0,
+        };
+        *arm.latest_feedback
+            .write()
+            .expect("latest feedback lock poisoned") = Some(feedback);
+
+        arm.set_state(ArmState::CommandFollowing)
+            .await
+            .expect("state transition should succeed");
+
+        let aggressive = [
+            MAX_COMMAND_JOINT_DELTA_RAD * 4.0,
+            -MAX_COMMAND_JOINT_DELTA_RAD * 4.0,
+            MAX_COMMAND_JOINT_DELTA_RAD * 2.0,
+            -MAX_COMMAND_JOINT_DELTA_RAD * 2.0,
+            MAX_COMMAND_JOINT_DELTA_RAD * 3.0,
+            -MAX_COMMAND_JOINT_DELTA_RAD * 3.0,
+        ];
+        arm.submit_joint_target(aggressive)
+            .expect("joint target should be accepted");
+
+        let frames = arm
+            .command_following_frames()
+            .expect("command-following frames should build");
+
+        assert_positions_close(decode_command_positions(&frames), aggressive);
+    }
+
+    #[tokio::test]
+    async fn ik_targets_are_clamped_to_max_joint_delta() {
+        // `submit_task_target` runs the cartesian pose through inverse
+        // kinematics, which can branch-switch or otherwise produce big
+        // jumps relative to the live feedback. Each joint of the
+        // emitted command must stay within `MAX_COMMAND_JOINT_DELTA_RAD`
+        // of feedback regardless of how far the IK output sat from it.
+        let Some(arm) = arm() else {
+            return;
+        };
+        let feedback = ArmJointFeedback {
+            positions: [0.0; 6],
+            velocities: [0.0; 6],
+            torques: [0.0; 6],
+            valid: true,
+            timestamp_millis: 0,
+        };
+        *arm.latest_feedback
+            .write()
+            .expect("latest feedback lock poisoned") = Some(feedback.clone());
+
+        arm.set_state(ArmState::CommandFollowing)
+            .await
+            .expect("state transition should succeed");
+
+        // The dummy IK backend used by `arm()` returns
+        // `[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]` for any pose — every joint
+        // is many multiples of `MAX_COMMAND_JOINT_DELTA_RAD` away from
+        // the zero feedback above.
+        let pose = Pose::from_slice(&[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]).unwrap();
+        arm.submit_task_target(&pose)
+            .expect("task target should be accepted");
+
+        let frames = arm
+            .command_following_frames()
+            .expect("command-following frames should build");
+
+        let positions = decode_command_positions(&frames);
+        for (joint_index, position) in positions.iter().enumerate() {
+            assert!(
+                (position - feedback.positions[joint_index]).abs()
+                    <= MAX_COMMAND_JOINT_DELTA_RAD + 1e-3,
+                "joint {joint_index} should be clamped within \
+                 MAX_COMMAND_JOINT_DELTA_RAD of feedback, got {position}"
+            );
+        }
     }
 
     #[test]

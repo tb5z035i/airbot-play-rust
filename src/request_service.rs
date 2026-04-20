@@ -61,7 +61,12 @@ impl RequestService {
 
         let mut outcome = RequestOutcome::default();
 
-        let recv_result = tokio::time::timeout(self.timeout, async {
+        // Wall-clock bound for the whole receive loop. `timeout()` alone only measures
+        // idle time between awaits; on a busy CAN bus (e.g. other devices spamming frames)
+        // `recv()` returns immediately every iteration, so the inner future never idles
+        // long enough for `timeout` to fire and the probe can hang indefinitely.
+        let deadline = tokio::time::Instant::now() + self.timeout;
+        let recv_result = tokio::time::timeout_at(deadline, async {
             loop {
                 let frame = io.recv().await?;
                 let decoded = inspect(&frame);
@@ -108,7 +113,8 @@ impl RequestService {
         }
 
         let mut outcome = RequestOutcome::default();
-        let recv_result = tokio::time::timeout(self.timeout, async {
+        let deadline = tokio::time::Instant::now() + self.timeout;
+        let recv_result = tokio::time::timeout_at(deadline, async {
             loop {
                 match frames_rx.recv().await {
                     Ok(routed) => {
@@ -159,7 +165,8 @@ impl RequestService {
             .await?;
 
         let mut outcome = RequestOutcome::default();
-        let recv_result = tokio::time::timeout(self.timeout, async {
+        let deadline = tokio::time::Instant::now() + self.timeout;
+        let recv_result = tokio::time::timeout_at(deadline, async {
             loop {
                 match frames_rx.recv().await {
                     Ok(frame) => {

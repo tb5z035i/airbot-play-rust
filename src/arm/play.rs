@@ -66,7 +66,12 @@ pub struct ArmJointFeedback {
     pub velocities: [f64; ARM_DOF],
     pub torques: [f64; ARM_DOF],
     pub valid: bool,
-    pub timestamp_millis: u128,
+    /// UNIX-epoch microseconds at the moment the CAN motor snapshot
+    /// landed inside `refresh_feedback_from_motors`. Downstream
+    /// consumers (the rollio-ng episode assembler in particular) use
+    /// this as the canonical sensor-receipt instant for the published
+    /// state samples.
+    pub timestamp_micros: u128,
 }
 
 #[derive(Clone, Debug)]
@@ -527,10 +532,10 @@ impl PlayArm {
             velocities,
             torques,
             valid,
-            timestamp_millis: SystemTime::now()
+            timestamp_micros: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
-                .as_millis(),
+                .as_micros(),
         })
     }
 
@@ -1025,7 +1030,7 @@ mod tests {
             velocities: [0.0; 6],
             torques: [0.0; 6],
             valid: true,
-            timestamp_millis: 0,
+            timestamp_micros: 0,
         };
         *arm.latest_feedback
             .write()
@@ -1051,7 +1056,7 @@ mod tests {
             velocities: [0.0; 6],
             torques: [0.0; 6],
             valid: true,
-            timestamp_millis: 0,
+            timestamp_micros: 0,
         };
         *arm.latest_feedback
             .write()
@@ -1075,7 +1080,7 @@ mod tests {
             velocities: [0.0; 6],
             torques: [0.0; 6],
             valid: true,
-            timestamp_millis: 0,
+            timestamp_micros: 0,
         };
         *arm.latest_feedback
             .write()
@@ -1111,7 +1116,7 @@ mod tests {
             velocities: [0.0; 6],
             torques: [0.0; 6],
             valid: true,
-            timestamp_millis: 0,
+            timestamp_micros: 0,
         };
         *arm.latest_feedback
             .write()
@@ -1154,7 +1159,7 @@ mod tests {
             velocities: [0.0; 6],
             torques: [0.0; 6],
             valid: true,
-            timestamp_millis: 0,
+            timestamp_micros: 0,
         };
         *arm.latest_feedback
             .write()

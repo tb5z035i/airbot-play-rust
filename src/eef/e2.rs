@@ -88,10 +88,10 @@ impl E2 {
             velocity,
             effort,
             valid: state.is_valid,
-            timestamp_millis: SystemTime::now()
+            timestamp_micros: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
-                .as_millis(),
+                .as_micros(),
         }
     }
 

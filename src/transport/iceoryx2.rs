@@ -27,7 +27,10 @@ pub struct SerializableArmFeedback {
     pub velocities: [f64; ARM_DOF],
     pub torques: [f64; ARM_DOF],
     pub valid: bool,
-    pub timestamp_millis: u64,
+    /// UNIX-epoch microseconds (mirror of `ArmJointFeedback.timestamp_micros`,
+    /// narrowed to `u64`). 64 bits of microseconds covers ~584,554 years
+    /// from epoch, so the saturating conversion below is purely defensive.
+    pub timestamp_micros: u64,
 }
 
 impl From<ArmJointFeedback> for SerializableArmFeedback {
@@ -37,7 +40,7 @@ impl From<ArmJointFeedback> for SerializableArmFeedback {
             velocities: value.velocities,
             torques: value.torques,
             valid: value.valid,
-            timestamp_millis: value.timestamp_millis.min(u64::MAX as u128) as u64,
+            timestamp_micros: value.timestamp_micros.min(u64::MAX as u128) as u64,
         }
     }
 }
@@ -48,7 +51,8 @@ pub struct SerializableEefFeedback {
     pub velocity: f64,
     pub effort: f64,
     pub valid: bool,
-    pub timestamp_millis: u64,
+    /// UNIX-epoch microseconds (mirror of `SingleEefFeedback.timestamp_micros`).
+    pub timestamp_micros: u64,
 }
 
 impl From<SingleEefFeedback> for SerializableEefFeedback {
@@ -58,7 +62,7 @@ impl From<SingleEefFeedback> for SerializableEefFeedback {
             velocity: value.velocity,
             effort: value.effort,
             valid: value.valid,
-            timestamp_millis: value.timestamp_millis.min(u64::MAX as u128) as u64,
+            timestamp_micros: value.timestamp_micros.min(u64::MAX as u128) as u64,
         }
     }
 }
@@ -962,7 +966,7 @@ mod tests {
                     velocities: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6],
                     torques: [0.6, 0.5, 0.4, 0.3, 0.2, 0.1],
                     valid: true,
-                    timestamp_millis: 42,
+                    timestamp_micros: 42,
                 });
 
                 let feedback_event = receive_event(&ports.event_subscriber).await?;

@@ -18,7 +18,11 @@ pub struct SingleEefFeedback {
     pub velocity: f64,
     pub effort: f64,
     pub valid: bool,
-    pub timestamp_millis: u128,
+    /// UNIX-epoch microseconds at the moment the EEF CAN motor snapshot
+    /// landed inside `feedback_from_motor_state`. Mirrors
+    /// `ArmJointFeedback.timestamp_micros` so downstream consumers can
+    /// align EEF samples with arm samples on the same time axis.
+    pub timestamp_micros: u128,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

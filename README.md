@@ -121,6 +121,42 @@ Build all targets:
 cargo build --locked --all-targets
 ```
 
+### Parallel Pinocchio (native) builds
+
+`build.rs` runs CMake to compile vendored Pinocchio. Native parallelism is taken
+from, in order: **`AIRBOT_PINOCCHIO_BUILD_JOBS`**, Cargo’s **`NUM_JOBS`** when it
+runs the build script, then the host’s parallel capacity.
+
+When building from the **parent rollio-ng repo**, `make rust-build` sets
+`AIRBOT_PINOCCHIO_BUILD_JOBS` from **`BUILD_JOBS`** (same knob as **`cmake
+--build`** for cameras). A legacy **`CMAKE_BUILD_JOBS=…` on the make command
+line** also forces **`BUILD_JOBS`** so Pinocchio and cameras stay aligned.
+
+Pinocchio pulls in large Eigen/C++ templates. If you set both
+`AIRBOT_PINOCCHIO_BUILD_JOBS` and `cargo -j` to full **`nproc`**, the machine
+may thrash CPU or run out of RAM; reduce **`AIRBOT_PINOCCHIO_BUILD_JOBS`** before
+tuning Cargo's `-j` upward.
+
+**Why a huge `-j` (e.g. 48) may still look “slow”:** Pinocchio + the `cxx` shim
+have a **long serial critical path** of huge template-instantiation translation
+units; on a 48-core box the **clean** native build floors at roughly **1m45s–2min**
+regardless of `-j` past about 8. Average CPU stays far below `nproc`.
+
+**Make + Cargo jobserver fight:** when CMake’s default generator (Unix Makefiles)
+runs inside Cargo, `gmake` emits `-jN forced in submake: resetting jobserver mode`
+and degrades scheduling. **`build.rs` selects Ninja automatically when `ninja` is
+on `PATH`** (install `ninja-build` on Debian/Ubuntu); set
+`AIRBOT_PINOCCHIO_USE_NINJA=0` to force the default generator. After changing the
+generator, run `cargo clean -p airbot_play_rust` if CMake errors.
+
+**Repeat native builds:** set `AIRBOT_PINOCCHIO_CCACHE=1` if `ccache` is
+installed.
+
+**Diagnostics:** `build.rs` emits one `cargo:warning=...` line per native
+configure listing **generator**, **jobs**, and the **source** of the job count
+(`AIRBOT_PINOCCHIO_BUILD_JOBS`, `NUM_JOBS`, or `available_parallelism`). If the
+job count looks wrong, check that env var first.
+
 Build only the WebSocket adapter:
 
 ```bash

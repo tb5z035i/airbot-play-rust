@@ -49,7 +49,7 @@ class ArmFeedback:
     velocities: list[float]
     torques: list[float]
     valid: bool
-    timestamp_millis: int
+    timestamp_micros: int
 
     @classmethod
     def from_payload(cls, payload: dict[str, Any]) -> "ArmFeedback":
@@ -63,7 +63,7 @@ class ArmFeedback:
             velocities=[float(value) for value in velocities],
             torques=[float(value) for value in torques],
             valid=bool(payload.get("valid", False)),
-            timestamp_millis=int(payload.get("timestamp_millis", 0)),
+            timestamp_micros=int(payload.get("timestamp_micros", 0)),
         )
 
 

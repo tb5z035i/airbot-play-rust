@@ -23,6 +23,9 @@ fn main() {
     // One directory watch each: Cargo tracks subtree changes without emitting thousands of
     // rerun-if-changed lines (recursive listing was ~1.3k paths and slowed every `cargo build`).
     println!("cargo:rerun-if-env-changed=AIRBOT_PINOCCHIO_DEP_PREFIX");
+    println!("cargo:rerun-if-env-changed=AIRBOT_PINOCCHIO_BUILD_JOBS");
+    println!("cargo:rerun-if-env-changed=AIRBOT_PINOCCHIO_USE_NINJA");
+    println!("cargo:rerun-if-env-changed=AIRBOT_PINOCCHIO_CCACHE");
     println!("cargo:rerun-if-env-changed=AMENT_PREFIX_PATH");
     println!("cargo:rerun-if-env-changed=CMAKE_PREFIX_PATH");
     println!(
@@ -111,11 +114,35 @@ fn build_native(
     dependency_lib_dir: &Path,
 ) -> PathBuf {
     let mut config = cmake::Config::new(manifest_dir.join("ffi"));
+    // Prefer Ninja when `ninja` is on PATH: Unix Makefiles under Cargo often hit
+    // "jobserver mode" conflicts with a large `-j` and under-utilize cores.
+    let use_ninja = pinocchio_use_ninja();
+    let use_ccache = pinocchio_use_ccache();
+    if use_ninja {
+        config.generator("Ninja");
+    }
+    if use_ccache {
+        config.define("CMAKE_CXX_COMPILER_LAUNCHER", "ccache");
+        config.define("CMAKE_C_COMPILER_LAUNCHER", "ccache");
+    }
     let urdfdom_headers_dir = find_urdfdom_headers_cmake_dir(dependency_prefix, dependency_lib_dir)
         .expect("failed to locate urdfdom_headers CMake config dir");
     let urdfdom_dir = find_urdfdom_cmake_dir(dependency_lib_dir)
         .expect("failed to locate urdfdom CMake config dir");
     let parallel_jobs = native_parallel_jobs();
+    let job_source = job_source_label();
+    println!(
+        "cargo:warning=airbot_play_rust pinocchio cmake: generator={} jobs={} (source={}) ccache={}",
+        if use_ninja { "Ninja" } else { "Unix Makefiles" },
+        parallel_jobs,
+        job_source,
+        use_ccache,
+    );
+    if !use_ninja && env::var("AIRBOT_PINOCCHIO_USE_NINJA").is_err() {
+        println!(
+            "cargo:warning=airbot_play_rust: install `ninja-build` for better parallelism (Make + Cargo jobserver fights cap CPU); set AIRBOT_PINOCCHIO_USE_NINJA=0 to silence."
+        );
+    }
     config
         .define(
             "PINOCCHIO_SOURCE_DIR",
@@ -149,6 +176,38 @@ fn build_native(
     config.build()
 }
 
+fn pinocchio_use_ninja() -> bool {
+    match env::var("AIRBOT_PINOCCHIO_USE_NINJA").as_deref() {
+        Ok("0") | Ok("false") | Ok("no") => return false,
+        _ => {}
+    }
+    executable_in_path("ninja")
+}
+
+fn pinocchio_use_ccache() -> bool {
+    env::var("AIRBOT_PINOCCHIO_CCACHE").as_deref() == Ok("1") && executable_in_path("ccache")
+}
+
+fn executable_in_path(cmd: &str) -> bool {
+    let Some(paths) = env::var_os("PATH") else {
+        return false;
+    };
+    for dir in env::split_paths(&paths) {
+        let candidate = dir.join(cmd);
+        if candidate.is_file() {
+            return true;
+        }
+        #[cfg(windows)]
+        {
+            let with_exe = dir.join(format!("{cmd}.exe"));
+            if with_exe.is_file() {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 fn native_parallel_jobs() -> usize {
     env::var("AIRBOT_PINOCCHIO_BUILD_JOBS")
         .ok()
@@ -162,6 +221,26 @@ fn native_parallel_jobs() -> usize {
         })
         .or_else(|| std::thread::available_parallelism().ok().map(usize::from))
         .unwrap_or(1)
+}
+
+fn job_source_label() -> &'static str {
+    if env::var("AIRBOT_PINOCCHIO_BUILD_JOBS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|v| *v > 0)
+        .is_some()
+    {
+        return "AIRBOT_PINOCCHIO_BUILD_JOBS";
+    }
+    if env::var("NUM_JOBS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|v| *v > 0)
+        .is_some()
+    {
+        return "NUM_JOBS (cargo)";
+    }
+    "available_parallelism"
 }
 
 fn detect_pinocchio_link_mode(native_lib_dir: &Path) -> PinocchioLinkMode {
